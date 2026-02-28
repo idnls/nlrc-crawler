@@ -79,7 +79,13 @@ def send_telegram_message(text):
 async def get_recent_judgments(search_keyword='부해', count=1):
     """검색 페이지에서 키워드로 검색하여 최근 N개의 상세 데이터를 추출"""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # Mac 환경에서 Chromium이 튕기는 현상(TargetClosedError)을 방지하기 위해 실제 Chrome 채널 사용 시도
+        try:
+            browser = await p.chromium.launch(headless=True, channel="chrome")
+        except Exception as e:
+            print(f"⚠️ 시스템 Chrome 실행 실패, 기본 Chromium으로 대체 시도: {e}")
+            browser = await p.chromium.launch(headless=True)
+            
         page = await browser.new_page()
         
         try:
