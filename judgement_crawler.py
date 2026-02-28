@@ -241,33 +241,45 @@ async def main():
         # 3. 알림 발송 처리
         items_to_send = all_results[:count] if is_test else all_results
         
-        # 오래된 순서대로 발송 (역순 처리)
+        # 실제 발송할 신규 사건 선별
+        new_items = []
         for latest in reversed(items_to_send):
             if latest['case_number'] == '미검출': continue
-            
-            # 테스트 모드이거나 신규 업데이트인 경우 발송
             if is_test or (latest['case_number'] not in sent_cases):
-                print(f"🎉 알림 발송 시도: {latest['case_number']} ({latest['committee']})")
-                
-                message = (
-                    f"🚨 [노동위원회 판정·결정요지 신규 업데이트]\n\n"
-                    f"🏢 위원회: {latest['committee']}\n"
-                    f"🔢 사건번호: {latest['case_number']}\n"
-                    f"📅 판정일: {latest['decision_date']}\n"
-                    f"⚖️ 판정결과: {latest['decision_result']}\n"
-                    f"📝 제목: {latest['title']}\n\n"
-                    f"✅ [판정사항]\n{latest['decision_matter']}\n\n"
-                    f"📖 [판정요지]\n{latest['decision_summary'][:1000]}"
-                )
-                
-                send_telegram_message(message)
-                
-                if not is_test:
-                    sent_cases.add(latest['case_number'])
-                    save_sent_cases(sent_cases)
-            else:
-                # 일반 모드에서는 이미 보낸 건이면 이후 과거 건들은 스킵 가능 (정렬되어 있으므로)
-                if not is_test: continue
+                new_items.append(latest)
+
+        sent_count = len(new_items)
+        
+        # 신규 업데이트가 있을 경우 요약 메시지 먼저 발송
+        if sent_count > 0 and not is_test:
+            print(f"📊 신규 업데이트 {sent_count}건 발견. 요약 메시지 발송 중...")
+            send_telegram_message(f"🔔 이번 주 노동위원회 판정·결정요지 신규 업데이트는 총 {sent_count}건입니다.")
+
+        # 개별 사건 발송
+        for latest in new_items:
+            print(f"🎉 알림 발송 시도: {latest['case_number']} ({latest['committee']})")
+            
+            message = (
+                f"🚨 [노동위원회 판정·결정요지 신규 업데이트]\n\n"
+                f"🏢 위원회: {latest['committee']}\n"
+                f"🔢 사건번호: {latest['case_number']}\n"
+                f"📅 판정일: {latest['decision_date']}\n"
+                f"⚖️ 판정결과: {latest['decision_result']}\n"
+                f"📝 제목: {latest['title']}\n\n"
+                f"✅ [판정사항]\n{latest['decision_matter']}\n\n"
+                f"📖 [판정요지]\n{latest['decision_summary'][:1000]}"
+            )
+            
+            send_telegram_message(message)
+            
+            if not is_test:
+                sent_cases.add(latest['case_number'])
+                save_sent_cases(sent_cases)
+
+        # 신규 업데이트가 없을 경우 안내 (테스트 모드 제외)
+        if sent_count == 0 and not is_test:
+            print("ℹ️ 신규 업데이트 건이 없습니다.")
+            send_telegram_message("✅ 이번 주 노동위원회 판정·결정요지 신규 업데이트가 없습니다.")
 
         if is_test or is_github_actions:
             if is_test: print("\n🧪 테스트 모드 종료.")
