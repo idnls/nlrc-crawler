@@ -21,6 +21,9 @@ LAST_CASE_FILE = "last_case.json"
 # 사건 종류 리스트
 CASE_CATEGORIES = ['부해', '부노', '차별', '교섭', '단위', '공정', '단협', '손해', '의결', '휴업', '재해', '상병', '노협']
 
+# 얼마나 과거의 소식까지 허용할지 (최근 90일 이내 판정된 건만 신규로 간주)
+MAX_DAYS_OLD = 90
+
 def clean_text(text):
     """HTML 태그 제거 및 텍스트 정제"""
     if not text: return ""
@@ -243,10 +246,20 @@ async def main():
         
         # 실제 발송할 신규 사건 선별
         new_items = []
+        now = datetime.now()
         for latest in reversed(items_to_send):
             if latest['case_number'] == '미검출': continue
-            if is_test or (latest['case_number'] not in sent_cases):
+            
+            # 날짜 확인: 너무 오래된 과거 건은 제외 (기본 14일)
+            days_diff = (now - parse_date(latest['decision_date'])).days
+            
+            # 테스트 모드이거나 (신규 번호이면서 최근 14일 이내인 경우) 발송
+            if is_test or (latest['case_number'] not in sent_cases and days_diff <= MAX_DAYS_OLD):
                 new_items.append(latest)
+            elif not is_test and latest['case_number'] not in sent_cases:
+                # 14일보다 오래된 건은 알림은 안 보내지만, '이미 확인한 것'으로 간주하여 기록 (다음에 또 안 나오게)
+                sent_cases.add(latest['case_number'])
+                save_sent_cases(sent_cases)
 
         sent_count = len(new_items)
         
