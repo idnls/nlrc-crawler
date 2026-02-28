@@ -8,10 +8,12 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 import requests
-from dotenv import load_dotenv
-
-# .env 파일 로드
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    # .env 파일 로드 (로컬 테스트용)
+    load_dotenv()
+except ImportError:
+    pass # GitHub Actions 등에서는 환경변수가 이미 설정되어 있으므로 무시
 
 # ==========================================
 # 1. 텔레그램 봇 설정 (환경 변수 우선 지원)
@@ -98,16 +100,16 @@ async def get_recent_judgments(search_keyword='부해', count=1):
             await page.fill('#pQuery', search_keyword)
             
             # 2. 검색 실행 및 목록 응답 대기
-            print("🔘 검색 실행 (최대 100건 요청)...")
+            print("🔘 검색 실행 (최대 30건 요청)...")
             await page.focus('#pQuery')
             await page.keyboard.press('Enter')
             
-            # 페이지당 100건 표출되도록 강제 주입
+            # 페이지당 30건 표출되도록 강제 주입
             await page.evaluate('''() => {
                 let form = document.querySelector('#searchForm') || document.forms[0];
                 if (form) {
                     let input = document.createElement('input');
-                    input.type = 'hidden'; input.name = 'pageUnit'; input.value = '100';
+                    input.type = 'hidden'; input.name = 'pageUnit'; input.value = '30';
                     form.appendChild(input);
                 }
             }''')
@@ -266,8 +268,8 @@ async def main():
         print(f"\n🔍 전체 {len(CASE_CATEGORIES)}개 사건 종류 모니터링 중...")
         for category in CASE_CATEGORIES:
             print(f"👉 '{category}' 검색 중...")
-            # 테스트 모드에서는 요청 개수만큼, 일반 구동 시에는 첫 페이지(최대 100건) 확인
-            fetch_count = count if is_test else 100
+            # 테스트 모드에서는 요청 개수만큼, 일반 구동 시에는 첫 페이지(최대 30건) 확인
+            fetch_count = count if is_test else 30
             cat_results = await get_recent_judgments(search_keyword=category, count=fetch_count)
             all_results.extend(cat_results)
             await asyncio.sleep(1) # 부하 방지
