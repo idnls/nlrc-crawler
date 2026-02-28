@@ -8,12 +8,16 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 import requests
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
 
 # ==========================================
 # 1. 텔레그램 봇 설정 (환경 변수 우선 지원)
 # ==========================================
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8659861176:AAFULSx6IumW1BWJWJhHspqBk9ss_1kmeso')
-CHAT_ID = os.environ.get('CHAT_ID', '6517178136')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '토큰 입력')
+CHAT_ID = os.environ.get('CHAT_ID', 'id 입력')
 
 # 마지막 사건번호 저장 파일 경로
 LAST_CASE_FILE = "last_case.json"
@@ -21,8 +25,8 @@ LAST_CASE_FILE = "last_case.json"
 # 사건 종류 리스트
 CASE_CATEGORIES = ['부해', '부노', '차별', '교섭', '단위', '공정', '단협', '손해', '의결', '휴업', '재해', '상병', '노협']
 
-# 얼마나 과거의 소식까지 허용할지 (최근 90일 이내 판정된 건만 신규로 간주)
-MAX_DAYS_OLD = 90
+# 얼마나 과거의 소식까지 허용할지 (최근 30일 이내 판정된 건만 신규로 간주)
+MAX_DAYS_OLD = 30
 
 def clean_text(text):
     """HTML 태그 제거 및 텍스트 정제"""
@@ -36,22 +40,43 @@ def clean_text(text):
     return cleaned.strip()
 
 def send_telegram_message(text):
-    """텔레그램으로 메시지 전송"""
-    if TELEGRAM_TOKEN == '여기에_봇_토큰_입력' or CHAT_ID == '여기에_채팅방_ID_입력':
+    """텔레그램으로 메시지 전송 (4096자 초과 시 분할 전송)"""
+    if TELEGRAM_TOKEN == '토큰 입력' or CHAT_ID == 'id 입력':
         print("⚠️ 텔레그램 토큰 또는 채팅 ID가 설정되지 않았습니다. 메시지를 보내지 않습니다.")
         return
 
+    # 텔레그램 메시지 길이 제한 (안전하게 4000자 기준)
+    MAX_LENGTH = 4000
+    
+    # 메시지 분할
+    parts = []
+    while len(text) > MAX_LENGTH:
+        # 가급적 줄바꿈 기준으로 자름
+        split_index = text.rfind('\n', 0, MAX_LENGTH)
+        if split_index == -1:
+            split_index = MAX_LENGTH
+        
+        parts.append(text[:split_index].strip())
+        text = text[split_index:].strip()
+    parts.append(text)
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {'chat_id': CHAT_ID, 'text': text}
-    print(f"📡 텔레그램 메시지 전송 시도 중... (Chat ID: {CHAT_ID})")
-    try:
-        response = requests.post(url, data=payload)
-        response.raise_for_status()
-        print("✅ 텔레그램 메시지 전송 성공!")
-    except Exception as e:
-        print(f"❌ 텔레그램 전송 실패: {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            print(f"   - 응답 내용: {e.response.text}")
+    
+    for i, part in enumerate(parts):
+        message_to_send = part
+        if len(parts) > 1:
+            message_to_send = f"[{i+1}/{len(parts)}]\n" + part
+
+        payload = {'chat_id': CHAT_ID, 'text': message_to_send}
+        print(f"📡 텔레그램 메시지 전송 시도 중... ({i+1}/{len(parts)}, Chat ID: {CHAT_ID})")
+        try:
+            response = requests.post(url, data=payload)
+            response.raise_for_status()
+            print(f"✅ 텔레그램 메시지 파트 {i+1} 전송 성공!")
+        except Exception as e:
+            print(f"❌ 텔레그램 전송 실패 (파트 {i+1}): {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"   - 응답 내용: {e.response.text}")
 
 async def get_recent_judgments(search_keyword='부해', count=1):
     """검색 페이지에서 키워드로 검색하여 최근 N개의 상세 데이터를 추출"""
@@ -280,7 +305,7 @@ async def main():
                 f"⚖️ 판정결과: {latest['decision_result']}\n"
                 f"📝 제목: {latest['title']}\n\n"
                 f"✅ [판정사항]\n{latest['decision_matter']}\n\n"
-                f"📖 [판정요지]\n{latest['decision_summary'][:1000]}"
+                f"📖 [판정요지]\n{latest['decision_summary']}"
             )
             
             send_telegram_message(message)
