@@ -16,8 +16,8 @@ load_dotenv()
 # ==========================================
 # 1. 텔레그램 봇 설정 (환경 변수 우선 지원)
 # ==========================================
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '토큰 입력')
-CHAT_ID = os.environ.get('CHAT_ID', 'id 입력')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8659861176:AAFULSx6IumW1BWJWJhHspqBk9ss_1kmeso')
+CHAT_ID = os.environ.get('CHAT_ID', '6517178136')
 
 # 마지막 사건번호 저장 파일 경로
 LAST_CASE_FILE = "last_case.json"
@@ -29,15 +29,13 @@ CASE_CATEGORIES = ['부해', '부노', '차별', '교섭', '단위', '공정', '
 MAX_DAYS_OLD = 30
 
 def clean_text(text):
-    """HTML 태그 제거 및 텍스트 정제"""
+    """HTML 태그 제거 및 텍스트 정제 (줄바꿈 보존)"""
     if not text: return ""
     # HTML 엔티티 변환 (&lt; -> < 등)
     text = html.unescape(text)
-    # 모든 HTML 태그 제거 (<b> 등)
-    clean = re.compile('<.*?>')
-    cleaned = re.sub(clean, '', text)
-    # 불필요한 공백 및 줄바꿈 정리
-    return cleaned.strip()
+    # 중복 공백 제거하되 줄바꿈은 보존
+    lines = [line.strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
 
 def send_telegram_message(text):
     """텔레그램으로 메시지 전송 (4096자 초과 시 분할 전송)"""
@@ -172,20 +170,20 @@ async def get_recent_judgments(search_keyword='부해', count=1):
                         matter_th = detail_soup.find('th', string=re.compile(r'^판정사항$')) or detail_soup.find('th', string='판정사항')
                         if matter_th:
                             matter_td = matter_th.find_next('td')
-                            if matter_td: item['decision_matter'] = clean_text(matter_td.get_text())
+                            if matter_td: item['decision_matter'] = clean_text(matter_td.get_text(separator="\n"))
                         
                         # 판정요지 (정확하게 "판정요지"인 th만 타격)
                         summary_th = detail_soup.find('th', string='판정요지')
                         if summary_th:
                             summary_td = summary_th.find_next('td')
-                            if summary_td: item['decision_summary'] = clean_text(summary_td.get_text())
+                            if summary_td: item['decision_summary'] = clean_text(summary_td.get_text(separator="\n"))
                         else:
                             # 차선책
                             summary_ths = detail_soup.find_all('th', string=re.compile('판정요지'))
                             for th in summary_ths:
                                 if th.get_text(strip=True) == "판정요지":
                                     summary_td = th.find_next('td')
-                                    if summary_td: item['decision_summary'] = clean_text(summary_td.get_text())
+                                    if summary_td: item['decision_summary'] = clean_text(summary_td.get_text(separator="\n"))
                                     break
                     
                     final_results.append(item)
