@@ -16,8 +16,8 @@ load_dotenv()
 # ==========================================
 # 1. 텔레그램 봇 설정 (환경 변수 우선 지원)
 # ==========================================
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '8659861176:AAFULSx6IumW1BWJWJhHspqBk9ss_1kmeso')
-CHAT_ID = os.environ.get('CHAT_ID', '6517178136')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN') or '8659861176:AAFULSx6IumW1BWJWJhHspqBk9ss_1kmeso'
+CHAT_ID = os.environ.get('CHAT_ID') or '6517178136'
 
 # 마지막 사건번호 저장 파일 경로
 LAST_CASE_FILE = "last_case.json"
@@ -25,8 +25,8 @@ LAST_CASE_FILE = "last_case.json"
 # 사건 종류 리스트
 CASE_CATEGORIES = ['부해', '부노', '차별', '교섭', '단위', '공정', '단협', '손해', '의결', '휴업', '재해', '상병', '노협']
 
-# 얼마나 과거의 소식까지 허용할지 (최근 30일 이내 판정된 건만 신규로 간주)
-MAX_DAYS_OLD = 30
+# 얼마나 과거의 소식까지 허용할지 (최근 60일 이내 판정된 건만 신규로 간주)
+MAX_DAYS_OLD = 60
 
 def clean_text(text):
     """HTML 태그 제거 및 텍스트 정제 (줄바꿈 보존)"""
@@ -98,9 +98,19 @@ async def get_recent_judgments(search_keyword='부해', count=1):
             await page.fill('#pQuery', search_keyword)
             
             # 2. 검색 실행 및 목록 응답 대기
-            print("🔘 검색 실행...")
+            print("🔘 검색 실행 (최대 100건 요청)...")
             await page.focus('#pQuery')
             await page.keyboard.press('Enter')
+            
+            # 페이지당 100건 표출되도록 강제 주입
+            await page.evaluate('''() => {
+                let form = document.querySelector('#searchForm') || document.forms[0];
+                if (form) {
+                    let input = document.createElement('input');
+                    input.type = 'hidden'; input.name = 'pageUnit'; input.value = '100';
+                    form.appendChild(input);
+                }
+            }''')
             
             try:
                 # expect_response는 클릭이나 엔터와 함께 비동기로 동작시키기 좋음
@@ -256,8 +266,8 @@ async def main():
         print(f"\n🔍 전체 {len(CASE_CATEGORIES)}개 사건 종류 모니터링 중...")
         for category in CASE_CATEGORIES:
             print(f"👉 '{category}' 검색 중...")
-            # 테스트 모드나 깃허브 액션에서는 요청 개수만큼, 일반 모드에선 최신 2건 확인
-            fetch_count = count if (is_test or is_github_actions) else 2
+            # 테스트 모드에서는 요청 개수만큼, 일반 구동 시에는 첫 페이지(최대 100건) 확인
+            fetch_count = count if is_test else 100
             cat_results = await get_recent_judgments(search_keyword=category, count=fetch_count)
             all_results.extend(cat_results)
             await asyncio.sleep(1) # 부하 방지
@@ -279,14 +289,14 @@ async def main():
         for latest in reversed(items_to_send):
             if latest['case_number'] == '미검출': continue
             
-            # 날짜 확인: 너무 오래된 과거 건은 제외 (기본 14일)
+            # 날짜 확인: 너무 오래된 과거 건은 제외 (기본 60일)
             days_diff = (now - parse_date(latest['decision_date'])).days
             
-            # 테스트 모드이거나 (신규 번호이면서 최근 14일 이내인 경우) 발송
+            # 테스트 모드이거나 (신규 번호이면서 최근 60일 이내인 경우) 발송
             if is_test or (latest['case_number'] not in sent_cases and days_diff <= MAX_DAYS_OLD):
                 new_items.append(latest)
             elif not is_test and latest['case_number'] not in sent_cases:
-                # 14일보다 오래된 건은 알림은 안 보내지만, '이미 확인한 것'으로 간주하여 기록 (다음에 또 안 나오게)
+                # 60일보다 오래된 건은 알림은 안 보내지만, '이미 확인한 것'으로 간주하여 기록 (다음에 또 안 나오게)
                 sent_cases.add(latest['case_number'])
                 save_sent_cases(sent_cases)
 
