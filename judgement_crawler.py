@@ -35,6 +35,8 @@ def clean_text(text):
     if not text: return ""
     # HTML 엔티티 변환 (&lt; -> < 등)
     text = html.unescape(text)
+    # HTML 태그 제거 (<b>, </b>, <br> 등)
+    text = re.sub(r'<[^>]+>', '', text)
     # 중복 공백 제거하되 줄바꿈은 보존
     lines = [line.strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line).strip()
