@@ -3,7 +3,7 @@ name: NLRC Judgement Crawler
 on:
   schedule:
     # 매주 금요일 오전 0시 (UTC) -> 한국 시간(KST) 오전 9시
-    - cron: '0 0 * * 5'
+    - cron: '0 1 * * 1'
   workflow_dispatch: # 수동 실행 버튼 추가
 
 jobs:
