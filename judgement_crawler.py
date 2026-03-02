@@ -18,8 +18,8 @@ except ImportError:
 # ==========================================
 # 1. 텔레그램 봇 설정 (환경 변수 우선 지원)
 # ==========================================
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN') or '8659861176:AAFULSx6IumW1BWJWJhHspqBk9ss_1kmeso'
-CHAT_ID = os.environ.get('CHAT_ID') or '6517178136'
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+CHAT_ID = os.environ.get('CHAT_ID')
 
 # 마지막 사건번호 저장 파일 경로
 LAST_CASE_FILE = "last_case.json"
