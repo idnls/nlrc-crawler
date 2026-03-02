@@ -15,13 +15,8 @@ try:
 except ImportError:
     pass
 
-# ==========================================
-# 1. 텔레그램 봇 설정 (토큰 및 ID 하드코딩 제거, 다중 ID 지원)
-# ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
 RAW_CHAT_IDS = os.environ.get('CHAT_ID', '')
-
-# 쉼표(,)로 구분된 다중 ID를 리스트로 변환
 CHAT_IDS = [cid.strip() for cid in RAW_CHAT_IDS.split(',')] if RAW_CHAT_IDS else []
 
 LAST_CASE_FILE = "last_case.json"
@@ -53,12 +48,11 @@ def send_telegram_message(text, reply_to_message_ids=None):
     parts.append(text)
     
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    first_message_ids = {} # 각 채팅방별 첫 메시지 ID 저장 {chat_id: message_id}
+    first_message_ids = {}
     
     for chat_id in CHAT_IDS:
         if not chat_id: continue
         
-        # 현재 chat_id에 해당하는 답글 대상 메시지 ID 찾기
         reply_to_id = None
         if reply_to_message_ids and isinstance(reply_to_message_ids, dict):
             reply_to_id = reply_to_message_ids.get(chat_id)
@@ -69,7 +63,7 @@ def send_telegram_message(text, reply_to_message_ids=None):
                 message_to_send = f"[{i+1}/{len(parts)}]\n" + part
             
             payload = {'chat_id': chat_id, 'text': message_to_send, 'parse_mode': 'HTML'}
-            if reply_to_id and i == 0: # 분할 메시지일 경우 첫 번째 파트에만 답장 처리
+            if reply_to_id and i == 0:
                 payload['reply_to_message_id'] = reply_to_id
                 
             try:
@@ -78,12 +72,13 @@ def send_telegram_message(text, reply_to_message_ids=None):
                 res_data = response.json()
                 if i == 0 and res_data.get('ok'):
                     first_message_ids[chat_id] = res_data['result']['message_id']
-            except Exception as e:
-                print(f"Error sending message to {chat_id}: {e}")
+            except Exception:
+                pass
                 
     return first_message_ids
 
-async def fetch_initial_case_details(page, case_number):
+async def fetch_initial_case_details(browser, case_number):
+    page = await browser.new_page()
     try:
         url = "https://nlrc.go.kr/nlrc/mainCase/judgment/search/index.do"
         await page.goto(url, wait_until="networkidle", timeout=60000)
@@ -117,28 +112,30 @@ async def fetch_initial_case_details(page, case_number):
             
         extracted_data = {'matter': '', 'summary': ''}
         
-        async with page.expect_response(lambda res: "/detail.do" in res.url and res.status == 200, timeout=15000) as response_info:
-            target_selector = f'a[data-k2="{case_number}"]'
-            await page.click(target_selector, force=True)
-            detail_resp_obj = await response_info.value
-            detail_content = await detail_resp_obj.text()
+        target_selector = f'a[data-k2="{case_number}"]'
+        await page.click(target_selector, force=True)
+        await asyncio.sleep(2)
+        
+        detail_content = await page.content()
+        detail_soup = BeautifulSoup(detail_content, 'html.parser')
+        
+        matter_th = detail_soup.find('th', string=re.compile(r'^판정사항$')) or detail_soup.find('th', string='판정사항')
+        if matter_th:
+            matter_td = matter_th.find_next('td')
+            if matter_td: extracted_data['matter'] = clean_text(matter_td.get_text(separator="\n"))
             
-            detail_soup = BeautifulSoup(detail_content, 'html.parser')
-            matter_th = detail_soup.find('th', string=re.compile(r'^판정사항$')) or detail_soup.find('th', string='판정사항')
-            if matter_th:
-                matter_td = matter_th.find_next('td')
-                if matter_td: extracted_data['matter'] = clean_text(matter_td.get_text(separator="\n"))
+        summary_ths = detail_soup.find_all('th', string=re.compile('판정요지'))
+        for th in summary_ths:
+            if th.get_text(strip=True) == "판정요지":
+                summary_td = th.find_next('td')
+                if summary_td: extracted_data['summary'] = clean_text(summary_td.get_text(separator="\n"))
+                break
                 
-            summary_ths = detail_soup.find_all('th', string=re.compile('판정요지'))
-            for th in summary_ths:
-                if th.get_text(strip=True) == "판정요지":
-                    summary_td = th.find_next('td')
-                    if summary_td: extracted_data['summary'] = clean_text(summary_td.get_text(separator="\n"))
-                    break
-                    
         return extracted_data
     except Exception:
         return None
+    finally:
+        await page.close()
 
 async def get_recent_judgments(search_keyword='부해', count=1):
     async with async_playwright() as p:
@@ -169,9 +166,11 @@ async def get_recent_judgments(search_keyword='부해', count=1):
                     list_content = await list_resp.text()
             except:
                 list_content = await page.content()
+                
             soup = BeautifulSoup(list_content, 'html.parser')
             dl_list = soup.find_all('dl', class_='C_Cts')
             judgments = []
+            
             for dl in dl_list:
                 item_data = {
                     'case_number': '미검출',
@@ -199,49 +198,80 @@ async def get_recent_judgments(search_keyword='부해', count=1):
                         item_data['decision_result'] = clean_text(raw_result.replace("|", ""))
                 if item_data['case_number'] != '미검출':
                     judgments.append(item_data)
+                    
             def parse_date(date_str):
                 try: return datetime.strptime(date_str, '%Y.%m.%d')
                 except: return datetime.min
+                
             judgments.sort(key=lambda x: parse_date(x['decision_date']), reverse=True)
             final_results = []
+            
             for i, item in enumerate(judgments[:count]):
                 try:
                     target_selector = f'a[data-k2="{item["case_number"]}"]'
-                    async with page.expect_response(lambda res: "/detail.do" in res.url and res.status == 200, timeout=15000) as response_info:
-                        await page.click(target_selector, force=True)
-                        detail_resp_obj = await response_info.value
-                        detail_content = await detail_resp_obj.text()
-                        detail_soup = BeautifulSoup(detail_content, 'html.parser')
-                        matter_th = detail_soup.find('th', string=re.compile(r'^판정사항$')) or detail_soup.find('th', string='판정사항')
-                        if matter_th:
-                            matter_td = matter_th.find_next('td')
-                            if matter_td: item['decision_matter'] = clean_text(matter_td.get_text(separator="\n"))
-                        summary_th = detail_soup.find('th', string='판정요지')
-                        if summary_th:
-                            summary_td = summary_th.find_next('td')
-                            if summary_td: item['decision_summary'] = clean_text(summary_td.get_text(separator="\n"))
-                        else:
-                            summary_ths = detail_soup.find_all('th', string=re.compile('판정요지'))
-                            for th in summary_ths:
-                                if th.get_text(strip=True) == "판정요지":
-                                    summary_td = th.find_next('td')
-                                    if summary_td: item['decision_summary'] = clean_text(summary_td.get_text(separator="\n"))
-                                    break
-                        chosim_btn = detail_soup.find(lambda t: t.name in ['a', 'button', 'span'] and '초심보기' in t.get_text())
-                        if chosim_btn:
-                            btn_html = str(chosim_btn)
-                            match = re.search(r'([0-9]{4}[가-힣]+[0-9]+)', btn_html)
-                            if match:
-                                item['initial_case'] = match.group(1)
+                    await page.click(target_selector, force=True)
+                    await asyncio.sleep(2)
+                    
+                    detail_content = await page.content()
+                    detail_soup = BeautifulSoup(detail_content, 'html.parser')
+                    
+                    matter_th = detail_soup.find('th', string=re.compile(r'^판정사항$')) or detail_soup.find('th', string='판정사항')
+                    if matter_th:
+                        matter_td = matter_th.find_next('td')
+                        if matter_td: item['decision_matter'] = clean_text(matter_td.get_text(separator="\n"))
+                        
+                    summary_th = detail_soup.find('th', string='판정요지')
+                    if summary_th:
+                        summary_td = summary_th.find_next('td')
+                        if summary_td: item['decision_summary'] = clean_text(summary_td.get_text(separator="\n"))
+                    else:
+                        summary_ths = detail_soup.find_all('th', string=re.compile('판정요지'))
+                        for th in summary_ths:
+                            if th.get_text(strip=True) == "판정요지":
+                                summary_td = th.find_next('td')
+                                if summary_td: item['decision_summary'] = clean_text(summary_td.get_text(separator="\n"))
+                                break
                                 
+                    initial_case = None
+                    
+                    chosim_tags = detail_soup.find_all(lambda t: t.name in ['a', 'button', 'span'] and '초심' in t.get_text())
+                    for tag in chosim_tags:
+                        match = re.search(r'([0-9]{4}[가-힣]{1,2}[0-9]+)', str(tag))
+                        if match:
+                            initial_case = match.group(1)
+                            break
+                            
+                    if not initial_case:
+                        for th in detail_soup.find_all('th'):
+                            text = th.get_text(strip=True)
+                            if '초심' in text or '관련사건' in text:
+                                td = th.find_next('td')
+                                if td:
+                                    match = re.search(r'([0-9]{4}[가-힣]{1,2}[0-9]+)', td.get_text())
+                                    if match:
+                                        initial_case = match.group(1)
+                                        break
+                                        
+                    if not initial_case:
+                        texts = detail_soup.find_all(string=re.compile('초심'))
+                        for text_node in texts:
+                            parent = text_node.parent
+                            if parent:
+                                match = re.search(r'([0-9]{4}[가-힣]{1,2}[0-9]+)', str(parent))
+                                if match and match.group(1) != item['case_number']:
+                                    initial_case = match.group(1)
+                                    break
+                                    
+                    item['initial_case'] = initial_case
+                    
                     await page.evaluate("""
                         document.querySelectorAll('.layer-wrap, .layer-bg, .dimmed, .layer-close, .btnClose').forEach(el => el.remove());
                         document.body.classList.remove('layer-open');
                         document.documentElement.style.overflow = 'auto';
                     """)
                     
-                    if item['initial_case']:
-                        item['initial_case_data'] = await fetch_initial_case_details(page, item['initial_case'])
+                    if item.get('initial_case'):
+                        item['initial_case_data'] = await fetch_initial_case_details(browser, item['initial_case'])
                     else:
                         item['initial_case_data'] = None
                         
@@ -273,9 +303,8 @@ def save_sent_cases(sent_cases):
 
 async def main():
     if not TELEGRAM_TOKEN or not CHAT_IDS:
-        print("❌ 오류: TELEGRAM_TOKEN 또는 CHAT_ID 환경 변수가 설정되지 않았습니다.")
         return
-
+        
     is_test = "--test" in sys.argv
     count = 1
     if is_test:
@@ -332,10 +361,8 @@ async def main():
                 f"📖 <b>[판정요지]</b>\n{safe_html(latest['decision_summary'])}"
             )
             
-            # 메인 메시지를 발송하고, 각 채팅방별 메시지 ID 딕셔너리를 반환받음
             main_msg_ids_dict = send_telegram_message(message)
             
-            # 초심 사건 정보가 존재하고 메인 메시지 발송에 성공했다면 답장 발송
             if main_msg_ids_dict and latest.get('initial_case_data'):
                 initial_data = latest['initial_case_data']
                 reply_message = (
@@ -343,7 +370,6 @@ async def main():
                     f"✅ <b>[초심 판정사항]</b>\n{safe_html(initial_data['matter'])}\n\n"
                     f"📖 <b>[초심 판정요지]</b>\n{safe_html(initial_data['summary'])}"
                 )
-                # 각 방의 메인 메시지 ID를 매칭하여 답장(Reply) 형태로 발송
                 send_telegram_message(reply_message, reply_to_message_ids=main_msg_ids_dict)
                 
             if not is_test:
