@@ -33,70 +33,10 @@ def get_committee_abbr(committee_name):
         return ''
     return committee_name[:2]
 
-def escape_md2(text):
-    """
-    Telegram MarkdownV2 특수문자 이스케이프.
-    _ * [ ] ( ) ~ ` > # + - = | { } . ! \\ 를 백슬래시로 처리.
-    스포일러(||...||) 내부 텍스트에도 동일하게 적용.
-    """
-    if not text:
-        return ''
-    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', text)
-
-def build_judgment_message(latest, matter_label, summary_label):
-    """
-    MarkdownV2 형식 판정 메시지 생성.
-    초심사건 데이터가 있으면 하단에 스포일러(||...||)로 삽입.
-    탭/클릭 전까지 접힌 상태로 표시됨.
-    """
-    e = escape_md2
-
-    msg  = f"🚨 \\[노동위원회 판정·결정요지 신규 업데이트\\]\n\n"
-    msg += f"🏢 위원회: {e(latest['committee'])}\n"
-    msg += f"🔢 사건번호: {e(latest['case_number'])}\n"
-
-    if latest.get('initial_case_display'):
-        msg += f"🔗 초심사건: {e(latest['initial_case_display'])}\n"
-
-    msg += f"📅 판정일: {e(latest['decision_date'])}\n"
-    msg += f"⚖️ 판정결과: {e(latest['decision_result'])}\n"
-    msg += f"📝 제목: {e(latest['title'])}\n\n"
-    msg += f"✅ \\[{e(matter_label)}\\]\n{e(latest['decision_matter'])}"
-
-    if matter_label == '판정사항':
-        msg += f"\n\n📖 \\[{e(summary_label)}\\]\n{e(latest['decision_summary'])}"
-    elif latest['decision_summary'] != '상세 내용 없음':
-        msg += f"\n\n📖 \\[{e(summary_label)}\\]\n{e(latest['decision_summary'])}"
-
-    # 초심사건 스포일러 블록 (탭하면 펼쳐짐)
-    if latest.get('initial_case') and latest.get('initial_case_data'):
-        initial_data   = latest['initial_case_data']
-        init_committee = initial_data.get('committee', '')
-        init_ml        = initial_data.get('matter_label', '판정사항')
-        init_sl        = initial_data.get('summary_label', '판정요지')
-
-        sp = ""
-        if init_committee:
-            sp += f"🏢 위원회: {e(init_committee)}\n\n"
-        sp += f"✅ \\[{e(init_ml)}\\]\n{e(initial_data['matter'])}"
-        if init_ml == '판정사항':
-            sp += f"\n\n📖 \\[{e(init_sl)}\\]\n{e(initial_data['summary'])}"
-        elif initial_data['summary'] != '상세 내용 없음':
-            sp += f"\n\n📖 \\[{e(init_sl)}\\]\n{e(initial_data['summary'])}"
-
-        msg += (
-            f"\n\n━━━ 🔍 초심사건: {e(latest['initial_case_display'])} "
-            f"\\(탭하여 펼치기\\) ━━━\n"
-            f"||{sp}||"
-        )
-
-    return msg
-
-def send_telegram_message(text, reply_to_message_ids=None, parse_mode=None):
+def send_telegram_message(text, reply_to_message_ids=None):
     """
     텔레그램 메시지 전송.
     reply_to_message_ids: {chat_id: message_id} → 해당 메시지의 댓글(답글)로 전송.
-    parse_mode: None(plain) 또는 'MarkdownV2'
     반환값: {chat_id: first_message_id}
     """
     if not TELEGRAM_TOKEN or not CHAT_IDS:
@@ -122,8 +62,6 @@ def send_telegram_message(text, reply_to_message_ids=None, parse_mode=None):
         for i, part in enumerate(parts):
             message_to_send = f"[{i+1}/{len(parts)}]\n" + part if len(parts) > 1 else part
             payload = {'chat_id': chat_id, 'text': message_to_send}
-            if parse_mode:
-                payload['parse_mode'] = parse_mode
             if i == 0 and reply_to_message_ids and chat_id in reply_to_message_ids:
                 payload['reply_to_message_id'] = reply_to_message_ids[chat_id]
             try:
@@ -575,15 +513,57 @@ async def main():
         for latest in new_items:
             print(f"🎉 발송: {latest['case_number']} ({latest['committee']})")
 
-            matter_label  = latest.get('matter_label', '판정사항')
+            matter_label = latest.get('matter_label', '판정사항')
             summary_label = latest.get('summary_label', '판정요지')
 
-            # MarkdownV2 메시지 빌드 (초심사건 있으면 스포일러 블록 포함)
-            message = build_judgment_message(latest, matter_label, summary_label)
-            has_spoiler = bool(latest.get('initial_case') and latest.get('initial_case_data'))
-            send_telegram_message(message, parse_mode='MarkdownV2')
-            if has_spoiler:
-                print(f"   🙈 초심사건 스포일러 포함 전송 완료")
+            # ① 재심 메시지
+            message = (
+                f"🚨 [노동위원회 판정·결정요지 신규 업데이트]\n\n"
+                f"🏢 위원회: {latest['committee']}\n"
+                f"🔢 사건번호: {latest['case_number']}\n"
+            )
+            if latest.get('initial_case_display'):
+                message += f"🔗 초심사건: {latest['initial_case_display']}\n"
+
+            message += (
+                f"📅 판정일: {latest['decision_date']}\n"
+                f"⚖️ 판정결과: {latest['decision_result']}\n"
+                f"📝 제목: {latest['title']}\n\n"
+                f"✅ [{matter_label}]\n{latest['decision_matter']}"
+            )
+            # 판정사건: 판정요지 항상 표시 (없으면 "상세 내용 없음")
+            # 결정사건: 결정요지가 실제로 있을 때만 표시 (없으면 아예 생략)
+            if matter_label == '판정사항':
+                message += f"\n\n📖 [{summary_label}]\n{latest['decision_summary']}"
+            elif latest['decision_summary'] != '상세 내용 없음':
+                message += f"\n\n📖 [{summary_label}]\n{latest['decision_summary']}"
+
+            sent_ids = send_telegram_message(message)
+
+            # ② 초심사건 데이터 있으면 댓글(답글)로 전송
+            if sent_ids and latest.get('initial_case') and latest.get('initial_case_data'):
+                initial_data = latest['initial_case_data']
+                init_committee = initial_data.get('committee', '')
+                init_abbr = get_committee_abbr(init_committee) if init_committee else ''
+                init_matter_label = initial_data.get('matter_label', '판정사항')
+                init_summary_label = initial_data.get('summary_label', '판정요지')
+
+                reply_message = (
+                    f"🔍 [초심사건 정보: {latest['initial_case_display']}]\n"
+                )
+                if init_committee:
+                    reply_message += f"🏢 위원회: {init_committee}\n\n"
+                else:
+                    reply_message += "\n"
+
+                reply_message += f"✅ [{init_matter_label}]\n{initial_data['matter']}"
+                if init_matter_label == '판정사항':
+                    reply_message += f"\n\n📖 [{init_summary_label}]\n{initial_data['summary']}"
+                elif initial_data['summary'] != '상세 내용 없음':
+                    reply_message += f"\n\n📖 [{init_summary_label}]\n{initial_data['summary']}"
+
+                send_telegram_message(reply_message, reply_to_message_ids=sent_ids)
+                print(f"   💬 초심사건 댓글 전송 완료")
 
             if not is_test:
                 sent_cases.add(latest['case_number'])
