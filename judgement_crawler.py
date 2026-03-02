@@ -50,7 +50,6 @@ def send_telegram_message(text):
         return
 
     MAX_LENGTH = 4000
-
     parts = []
     remaining = text
     while len(remaining) > MAX_LENGTH:
@@ -69,7 +68,6 @@ def send_telegram_message(text):
             message_to_send = part
             if len(parts) > 1:
                 message_to_send = f"[{i+1}/{len(parts)}]\n" + part
-
             payload = {'chat_id': chat_id, 'text': message_to_send}
             try:
                 response = requests.post(url, data=payload)
@@ -80,46 +78,94 @@ def send_telegram_message(text):
                 if hasattr(e, 'response') and e.response is not None:
                     print(f"     응답 내용: {e.response.text}")
 
-def extract_initial_case_number(detail_soup, current_case_number):
-    """상세 페이지 HTML에서 초심사건번호 추출 시도"""
-    # 방법 1: 초심 관련 태그에서 사건번호 패턴 검색
-    chosim_tags = detail_soup.find_all(
-        lambda t: t.name in ['a', 'button', 'span', 'td', 'th'] and '초심' in t.get_text()
-    )
-    for tag in chosim_tags:
-        # 태그 전체 HTML 문자열에서 사건번호 패턴 검색 (onclick, data 속성 포함)
-        tag_html = str(tag)
-        matches = re.findall(r'([0-9]{4}[가-힣]{1,4}[0-9]+)', tag_html)
-        for match in matches:
+def extract_matter_and_summary(detail_soup):
+    """판정사항/결정사항, 판정요지/결정요지 추출 (두 가지 명칭 모두 지원)"""
+    matter_text = '상세 내용 없음'
+    summary_text = '상세 내용 없음'
+    matter_label = '판정사항'
+    summary_label = '판정요지'
+
+    # ① 판정사항 또는 결정사항 찾기
+    matter_th = None
+    for keyword in ['판정사항', '결정사항']:
+        matter_th = (
+            detail_soup.find('th', string=re.compile(rf'^{keyword}$')) or
+            detail_soup.find('th', string=keyword)
+        )
+        if matter_th:
+            matter_label = keyword
+            break
+
+    if matter_th:
+        matter_td = matter_th.find_next('td')
+        if matter_td:
+            matter_text = clean_text(matter_td.get_text(separator="\n"))
+
+    # ② 판정요지 또는 결정요지 찾기
+    summary_th = None
+    for keyword in ['판정요지', '결정요지']:
+        summary_th = detail_soup.find('th', string=keyword)
+        if not summary_th:
+            for th in detail_soup.find_all('th', string=re.compile(keyword)):
+                if th.get_text(strip=True) == keyword:
+                    summary_th = th
+                    break
+        if summary_th:
+            summary_label = keyword
+            break
+
+    if summary_th:
+        summary_td = summary_th.find_next('td')
+        if summary_td:
+            summary_text = clean_text(summary_td.get_text(separator="\n"))
+
+    return matter_text, summary_text, matter_label, summary_label
+
+async def try_get_initial_case(page, current_case_number):
+    """초심보기 버튼 클릭으로 초심사건번호 추출 시도"""
+    try:
+        # 초심보기 버튼 찾기
+        chosim_btn = page.locator('button:has-text("초심보기"), a:has-text("초심보기")')
+        btn_count = await chosim_btn.count()
+
+        if btn_count == 0:
+            print("   ℹ️ 초심보기 버튼 없음 (초심사건 아님)")
+            return None
+
+        print("   🔍 초심보기 버튼 발견, 클릭 시도...")
+
+        # 초심보기 버튼 클릭 후 detail.do 응답 캡처
+        async with page.expect_response(
+            lambda res: "/detail.do" in res.url and res.status == 200,
+            timeout=15000
+        ) as init_resp_info:
+            await chosim_btn.first.click(force=True)
+            init_resp = await init_resp_info.value
+            init_content = await init_resp.text()
+
+        init_soup = BeautifulSoup(init_content, 'html.parser')
+
+        # 초심 페이지에서 사건번호 추출
+        # 방법 1: "사건 : XXXX" 패턴 찾기
+        case_text_nodes = init_soup.find_all(string=re.compile(r'사건\s*:'))
+        for node in case_text_nodes:
+            match = re.search(r'사건\s*:\s*([0-9]{4}[가-힣]{1,4}[0-9]+)', node)
+            if match:
+                initial_case = match.group(1)
+                if initial_case != current_case_number:
+                    print(f"   🔗 초심사건번호 확인: {initial_case}")
+                    return initial_case
+
+        # 방법 2: 페이지 전체에서 사건번호 패턴 검색
+        all_case_matches = re.findall(r'([0-9]{4}[가-힣]{1,4}[0-9]+)', init_content)
+        for match in all_case_matches:
             if match != current_case_number:
-                print(f"   🔗 초심사건번호 발견 (방법1): {match}")
+                print(f"   🔗 초심사건번호 추정: {match}")
                 return match
 
-    # 방법 2: th/td 테이블에서 '관련사건' 또는 '초심' 키워드 찾기
-    for th in detail_soup.find_all('th'):
-        text = th.get_text(strip=True)
-        if '초심' in text or '관련사건' in text or '원사건' in text:
-            td = th.find_next('td')
-            if td:
-                matches = re.findall(r'([0-9]{4}[가-힣]{1,4}[0-9]+)', td.get_text())
-                for match in matches:
-                    if match != current_case_number:
-                        print(f"   🔗 초심사건번호 발견 (방법2): {match}")
-                        return match
+    except Exception as e:
+        print(f"   ⚠️ 초심보기 버튼 클릭 실패: {e}")
 
-    # 방법 3: 페이지 전체에서 초심 텍스트 근처의 사건번호 패턴 검색
-    full_html = str(detail_soup)
-    chosim_positions = [m.start() for m in re.finditer('초심', full_html)]
-    for pos in chosim_positions:
-        # 초심 키워드 앞뒤 200자 범위에서 사건번호 패턴 검색
-        snippet = full_html[max(0, pos-50):pos+200]
-        matches = re.findall(r'([0-9]{4}[가-힣]{1,4}[0-9]+)', snippet)
-        for match in matches:
-            if match != current_case_number:
-                print(f"   🔗 초심사건번호 발견 (방법3): {match}")
-                return match
-
-    print("   ℹ️ 초심사건번호 없음 (초심사건이 아닌 경우)")
     return None
 
 async def get_recent_judgments(search_keyword='부해', count=1):
@@ -177,6 +223,8 @@ async def get_recent_judgments(search_keyword='부해', count=1):
                     'decision_date': '날짜 미표기',
                     'decision_matter': '상세 내용 없음',
                     'decision_summary': '상세 내용 없음',
+                    'matter_label': '판정사항',
+                    'summary_label': '판정요지',
                     'initial_case': None
                 }
 
@@ -221,27 +269,15 @@ async def get_recent_judgments(search_keyword='부해', count=1):
 
                     detail_soup = BeautifulSoup(detail_content, 'html.parser')
 
-                    # 판정사항
-                    matter_th = detail_soup.find('th', string=re.compile(r'^판정사항$')) or detail_soup.find('th', string='판정사항')
-                    if matter_th:
-                        matter_td = matter_th.find_next('td')
-                        if matter_td: item['decision_matter'] = clean_text(matter_td.get_text(separator="\n"))
+                    # ★ 판정사항/결정사항, 판정요지/결정요지 모두 지원
+                    matter, summary, matter_label, summary_label = extract_matter_and_summary(detail_soup)
+                    item['decision_matter'] = matter
+                    item['decision_summary'] = summary
+                    item['matter_label'] = matter_label
+                    item['summary_label'] = summary_label
 
-                    # 판정요지
-                    summary_th = detail_soup.find('th', string='판정요지')
-                    if summary_th:
-                        summary_td = summary_th.find_next('td')
-                        if summary_td: item['decision_summary'] = clean_text(summary_td.get_text(separator="\n"))
-                    else:
-                        summary_ths = detail_soup.find_all('th', string=re.compile('판정요지'))
-                        for th in summary_ths:
-                            if th.get_text(strip=True) == "판정요지":
-                                summary_td = th.find_next('td')
-                                if summary_td: item['decision_summary'] = clean_text(summary_td.get_text(separator="\n"))
-                                break
-
-                    # 초심사건번호 추출 시도
-                    item['initial_case'] = extract_initial_case_number(detail_soup, item['case_number'])
+                    # ★ 초심보기 버튼 클릭으로 초심사건번호 추출
+                    item['initial_case'] = await try_get_initial_case(page, item['case_number'])
 
                     final_results.append(item)
                     print(f"   ✅ 데이터 확보 완료 (초심사건: {item['initial_case'] or '없음'})")
@@ -322,9 +358,7 @@ async def main():
         now = datetime.now()
         for latest in reversed(items_to_send):
             if latest['case_number'] == '미검출': continue
-
             days_diff = (now - parse_date(latest['decision_date'])).days
-
             if is_test or (latest['case_number'] not in sent_cases and days_diff <= MAX_DAYS_OLD):
                 new_items.append(latest)
             elif not is_test and latest['case_number'] not in sent_cases:
@@ -340,6 +374,9 @@ async def main():
         for latest in new_items:
             print(f"🎉 알림 발송 시도: {latest['case_number']} ({latest['committee']})")
 
+            matter_label = latest.get('matter_label', '판정사항')
+            summary_label = latest.get('summary_label', '판정요지')
+
             message = (
                 f"🚨 [노동위원회 판정·결정요지 신규 업데이트]\n\n"
                 f"🏢 위원회: {latest['committee']}\n"
@@ -353,8 +390,8 @@ async def main():
                 f"📅 판정일: {latest['decision_date']}\n"
                 f"⚖️ 판정결과: {latest['decision_result']}\n"
                 f"📝 제목: {latest['title']}\n\n"
-                f"✅ [판정사항]\n{latest['decision_matter']}\n\n"
-                f"📖 [판정요지]\n{latest['decision_summary']}"
+                f"✅ [{matter_label}]\n{latest['decision_matter']}\n\n"
+                f"📖 [{summary_label}]\n{latest['decision_summary']}"
             )
 
             send_telegram_message(message)
