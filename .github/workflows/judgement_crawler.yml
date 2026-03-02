@@ -1,9 +1,9 @@
 name: NLRC Judgement Crawler
 
 on:
-  schedule:
-    - cron: '44 23 * * 1'
   workflow_dispatch:
+  repository_dispatch:
+    types: [cron_trigger]
 
 jobs:
   build:
@@ -37,4 +37,4 @@ jobs:
         git config --global user.name "GitHub Actions"
         git config --global user.email "actions@github.com"
         git add last_case.json
-        git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update last_case.json" && git push)
+        git diff --quiet && git diff --staged --quiet || (git commit -m "update last_case.json" && git push)
