@@ -2,7 +2,7 @@ name: NLRC Judgement Crawler
 
 on:
   schedule:
-    - cron: '10 8 * * 1'
+    - cron: '44 23 * * 1'
   workflow_dispatch:
 
 jobs:
