@@ -47,17 +47,20 @@ def send_telegram_message(text):
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
-    for i, part in enumerate(parts):
-        message_to_send = part
-        if len(parts) > 1:
-            message_to_send = f"[{i+1}/{len(parts)}]\n" + part
+    chat_id_list = [cid.strip() for cid in str(CHAT_ID).split(',') if cid.strip()]
 
-        payload = {'chat_id': CHAT_ID, 'text': message_to_send}
-        try:
-            response = requests.post(url, data=payload)
-            response.raise_for_status()
-        except Exception:
-            pass
+    for cid in chat_id_list:
+        for i, part in enumerate(parts):
+            message_to_send = part
+            if len(parts) > 1:
+                message_to_send = f"[{i+1}/{len(parts)}]\n" + part
+
+            payload = {'chat_id': cid, 'text': message_to_send}
+            try:
+                response = requests.post(url, data=payload)
+                response.raise_for_status()
+            except Exception:
+                pass
 
 async def get_recent_judgments(search_keyword='부해', count=1):
     async with async_playwright() as p:
