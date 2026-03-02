@@ -114,52 +114,63 @@ def extract_matter_and_summary(detail_soup):
 
     return matter_text, summary_text, matter_label, summary_label
 
+def extract_initial_case_from_html(html_content, current_case_number):
+    """
+    detail.do AJAX 응답 HTML에서 초심사건번호 추출.
+
+    실제 HTML 구조 (개발자도구 확인):
+      <input type="hidden" id="medi_numb" name="medi_numb" value="2025부해110">  ← 초심사건번호
+      <input type="hidden" id="even_numb" name="even_numb" value="2025부해1582"> ← 재심사건번호(현재)
+      <button ... title="초심보기" onclick="detailClick('JR')">초심보기</button>  ← onclick에 번호 없음!
+
+    따라서 medi_numb hidden input의 value를 직접 읽는 것이 정확한 방법.
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    # ★ 핵심: medi_numb hidden input에서 직접 추출
+    medi_input = (
+        soup.find('input', {'id': 'medi_numb'}) or
+        soup.find('input', {'name': 'medi_numb'})
+    )
+    if medi_input:
+        case_number = medi_input.get('value', '').strip()
+        if case_number and case_number != current_case_number:
+            print(f"   ✅ 초심사건번호 추출 (medi_numb): {case_number}")
+            return case_number
+        elif case_number:
+            print(f"   ℹ️ medi_numb 값이 현재 사건번호와 동일 (초심 없음): {case_number}")
+            return None
+
+    print("   ℹ️ HTML에서 medi_numb 미검출 → fallback 시도")
+    return None
+
+
 async def get_initial_case_number_via_js(page, current_case_number):
     """
-    JavaScript로 현재 페이지에 열린 팝업의 초심보기 버튼 onclick 값에서
-    사건번호 추출 (클릭 없이 DOM 직접 조회).
+    JS DOM 쿼리로 medi_numb hidden input의 value 읽기.
+    (AJAX HTML 파싱 실패 시 fallback)
     """
     try:
-        btn_info = await page.evaluate("""
+        result = await page.evaluate("""
             () => {
-                const allBtns = Array.from(document.querySelectorAll('button, a, input[type="button"]'));
-                const chosimBtn = allBtns.find(b =>
-                    b.textContent && b.textContent.trim().includes('초심보기')
-                );
-                if (!chosimBtn) return null;
-                return {
-                    onclick: chosimBtn.getAttribute('onclick') || '',
-                    href:    chosimBtn.getAttribute('href')    || '',
-                    value:   chosimBtn.getAttribute('value')   || '',
-                    data:    JSON.stringify(chosimBtn.dataset  || {})
-                };
+                const el = document.querySelector('#medi_numb, input[name="medi_numb"]');
+                return el ? el.value : null;
             }
         """)
 
-        if not btn_info:
-            print("   ℹ️ 초심보기 버튼 없음")
-            return None
+        if result and result.strip():
+            case_number = result.strip()
+            if case_number != current_case_number:
+                print(f"   ✅ 초심사건번호 추출 (JS DOM medi_numb): {case_number}")
+                return case_number
+            else:
+                print(f"   ℹ️ medi_numb DOM 값 = 현재 사건번호 (초심 없음)")
+                return None
 
-        combined = btn_info.get('onclick', '') + btn_info.get('href', '') + \
-                   btn_info.get('value', '') + btn_info.get('data', '')
-        print(f"   🔍 초심보기 버튼 발견: {combined[:100]}")
-
-        # 따옴표 안 사건번호 우선
-        for pattern in [
-            r"'([0-9]{4}[가-힣]{1,4}[0-9]+)'",
-            r'"([0-9]{4}[가-힣]{1,4}[0-9]+)"',
-            r'([0-9]{4}[가-힣]{1,4}[0-9]+)'
-        ]:
-            matches = re.findall(pattern, combined)
-            for m in matches:
-                if m != current_case_number:
-                    print(f"   🔗 초심사건번호 추출: {m}")
-                    return m
-
-        print("   ⚠️ 초심사건번호 파싱 실패")
+        print("   ℹ️ DOM에서 medi_numb 없음")
         return None
     except Exception as e:
-        print(f"   ⚠️ JS 실행 오류: {e}")
+        print(f"   ⚠️ JS DOM 오류: {e}")
         return None
 
 async def fetch_initial_case_details(browser, case_number):
@@ -337,11 +348,18 @@ async def get_recent_judgments(search_keyword='부해', count=1):
 
                     # 중앙노동위원회 재심판정만 초심사건 처리
                     if '중앙' in item['committee']:
-                        # ★ JS로 현재 팝업의 초심보기 버튼 onclick에서 사건번호 추출 (클릭 X)
-                        await asyncio.sleep(1)  # DOM 업데이트 대기
-                        initial_case_number = await get_initial_case_number_via_js(
-                            page, item['case_number']
+                        # ★ 방법 1: AJAX 응답 HTML에서 직접 파싱 (가장 신뢰도 높음)
+                        initial_case_number = extract_initial_case_from_html(
+                            detail_content, item['case_number']
                         )
+
+                        # ★ 방법 2: JS DOM 쿼리 (HTML 파싱 실패 시 fallback)
+                        if not initial_case_number:
+                            print("   🔄 HTML 파싱 실패 → JS DOM 쿼리 시도...")
+                            await asyncio.sleep(1)  # DOM 렌더링 대기
+                            initial_case_number = await get_initial_case_number_via_js(
+                                page, item['case_number']
+                            )
 
                         if initial_case_number:
                             # ★ 별도 탭에서 초심사건 검색 (상태 오염 없음)
