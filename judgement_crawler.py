@@ -207,14 +207,15 @@ async def main():
             print("  판정사항 th 미검출")
 
         # ── 최종 판정 ────────────────────────────────────────────────────────
-        # ★ 중앙이어도 오류 아님: 법원 파기환송 등으로 3심 구조인 경우
-        #   (지방→중앙초심→중앙재심), 초심이 중앙일 수 있음.
-        #   판단 기준: 요청한 초심사건번호가 응답에 포함됐는가.
+        # 초심은 항상 지방노동위원회 소관.
+        # 위원회가 중앙이라면 파라미터 오류 (comm_code/even_gubn 잘못됨).
+        # 판단 기준: 요청한 초심사건번호가 응답에 포함됐는가.
         print(f"\n{'='*50}")
         if medi_numb in initial_content and committee:
             print(f"✅ 성공: 초심사건({medi_numb}) 정상 조회")
             print(f"   위원회: {committee}")
-            print(f"   (중앙 표시 시 → 법원 파기환송 등 3심 구조 케이스일 수 있음)")
+            if '중앙' in committee:
+                print(f"   ⚠️ 주의: 초심 위원회가 중앙 → comm_code/even_gubn 파라미터 확인 필요")
         elif committee:
             print(f"❌ 실패: 초심사건번호({medi_numb})가 응답에 없음 → 파라미터 불일치")
             print(f"   응답의 위원회: {committee}")
