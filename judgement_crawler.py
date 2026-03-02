@@ -1,6 +1,7 @@
 """
-중앙노동위원회 사건 1건 + 초심사건 단계별 테스트 스크립트
-각 단계에서 무엇이 있는지 상세 출력
+중앙노동위원회 사건 + 초심사건 단계별 테스트 v2
+- 핵심: 초심보기 클릭 시 발생하는 /detail.do AJAX 요청을 직접 캡처
+- page.on("request") 로 POST body까지 확인해서 정확한 필터 조건 파악
 """
 import asyncio
 import re
@@ -67,12 +68,22 @@ async def test():
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
 
+        # ── /detail.do 요청을 모두 로깅 ──
+        captured_requests = []
+        def on_request(req):
+            if "detail.do" in req.url:
+                body = req.post_data or ""
+                captured_requests.append({'url': req.url, 'method': req.method, 'body': body})
+                print(f"\n  🌐 [REQUEST] {req.method} {req.url}")
+                print(f"      body = {body[:300]}")
+
+        page.on("request", on_request)
+
         try:
             url = "https://nlrc.go.kr/nlrc/mainCase/judgment/search/index.do"
             print(f"[1] 접속: {url}")
             await page.goto(url, wait_until="networkidle", timeout=60000)
 
-            # ── 검색 ──
             await page.fill('#pQuery', '부해')
             await page.focus('#pQuery')
             await page.keyboard.press('Enter')
@@ -83,28 +94,24 @@ async def test():
                     await page.click('.btnSearch')
                     list_content = await (await ri.value).text()
             except Exception as e:
-                print(f"  ⚠️ list.do 캡처 실패: {e}")
+                print(f"  ⚠️ list 캡처 실패: {e}")
                 list_content = await page.content()
 
             soup = BeautifulSoup(list_content, 'html.parser')
             dl_list = soup.find_all('dl', class_='C_Cts')
             print(f"[2] 검색결과: {len(dl_list)}건")
 
-            # ── 중앙노동위원회 사건 1건 추출 ──
+            # 중앙노동위원회 사건 1건
             target = None
             for dl in dl_list:
                 dt = dl.find('dt', class_='tit')
-                if not dt:
-                    continue
+                if not dt: continue
                 a = dt.find('a')
-                if not a:
-                    continue
+                if not a: continue
                 strong = a.find('strong')
-                if not strong or '중앙' not in strong.get_text():
-                    continue
+                if not strong or '중앙' not in strong.get_text(): continue
                 spans = a.find_all('span')
-                if not spans:
-                    continue
+                if not spans: continue
                 target = {
                     'committee': clean_text(strong.get_text()),
                     'case_number': clean_text(spans[0].get_text()),
@@ -117,145 +124,92 @@ async def test():
 
             print(f"\n[3] 테스트 대상: {target['case_number']} / {target['committee']}")
 
-            # ── 재심 상세 팝업 열기 ──
+            # ── 재심 팝업 열기 ──
             selector = f'a[data-k2="{target["case_number"]}"]'
-            print(f"[4] 클릭: {selector}")
+            captured_requests.clear()
+            print(f"\n[4] 재심 클릭 (expect_response)...")
             async with page.expect_response(
                 lambda res: "/detail.do" in res.url and res.status == 200, timeout=15000
             ) as ri:
                 await page.click(selector, force=True)
                 detail_content = await (await ri.value).text()
 
-            detail_soup = BeautifulSoup(detail_content, 'html.parser')
+            print(f"[4] 캡처 완료 ({len(detail_content)}자), 요청 {len(captured_requests)}건")
 
-            # hidden inputs 확인
+            detail_soup = BeautifulSoup(detail_content, 'html.parser')
             medi = detail_soup.find('input', {'id': 'medi_numb'}) or detail_soup.find('input', {'name': 'medi_numb'})
             even = detail_soup.find('input', {'id': 'even_numb'}) or detail_soup.find('input', {'name': 'even_numb'})
             gubn = detail_soup.find('input', {'id': 'even_gubn'}) or detail_soup.find('input', {'name': 'even_gubn'})
             medi_numb = medi.get('value', '').strip() if medi else '없음'
             even_numb = even.get('value', '').strip() if even else '없음'
-            even_gubn_val = gubn.get('value', '').strip() if gubn else '없음'
+            gubn_val  = gubn.get('value', '').strip() if gubn else '없음'
 
-            print(f"[5] AJAX HTML hidden inputs:")
-            print(f"    even_numb (재심사건번호) = {even_numb}")
-            print(f"    medi_numb (초심사건번호) = {medi_numb}")
-            print(f"    even_gubn               = {even_gubn_val}")
-
-            matter, summary, matter_label, _ = extract_matter_and_summary(detail_soup)
-            committee = extract_committee_from_detail(detail_soup)
-            print(f"[6] 재심 위원회: {committee}")
-            print(f"    [{matter_label}]: {matter[:100]}...")
+            print(f"[5] 재심 AJAX: even_numb={even_numb}, medi_numb={medi_numb}, even_gubn={gubn_val}")
 
             if not medi_numb or medi_numb == even_numb:
-                print("[7] 초심사건 없음 (medi_numb 비어있거나 재심과 동일)")
+                print("[X] 초심사건 없음 — 종료")
                 return
 
-            print(f"\n[7] 초심보기 버튼 클릭 시도 (초심: {medi_numb})")
+            # 혹시 이미 더 요청이 왔는지 잠깐 대기
+            await asyncio.sleep(1)
+            print(f"[5b] 1초 대기 후 추가 /detail.do 요청 수: {len(captured_requests)}")
 
-            # ── DOM에서 현재 even_gubn 확인 ──
-            dom_gubn_before = await page.evaluate("""
-                () => {
-                    const el = document.querySelector('#even_gubn, input[name="even_gubn"]');
-                    return el ? el.value : 'NOT FOUND';
-                }
-            """)
-            print(f"[8] 클릭 전 DOM even_gubn = {dom_gubn_before}")
+            # ── 초심보기 클릭 (expect_response 방식) ──
+            print(f"\n[6] 초심보기 버튼 클릭 (expect_response)...")
+            captured_requests.clear()
 
-            # ── 버튼 찾기 ──
-            btn_info = await page.evaluate("""
-                () => {
-                    const btns = Array.from(document.querySelectorAll('button'));
-                    const found = btns.find(
-                        b => b.title === '초심보기' ||
-                             (b.textContent && b.textContent.trim().includes('초심보기'))
-                    );
-                    if (!found) return { found: false, count: btns.length };
-                    return {
-                        found: true,
-                        title: found.title,
-                        text: found.textContent.trim().substring(0, 30),
-                        onclick: found.getAttribute('onclick') || '',
-                        count: btns.length
-                    };
-                }
-            """)
-            print(f"[9] 버튼 탐색: {btn_info}")
+            try:
+                async with page.expect_response(
+                    lambda res: "/detail.do" in res.url and res.status == 200,
+                    timeout=10000
+                ) as ri2:
+                    clicked = await page.evaluate("""
+                        () => {
+                            const btn = Array.from(document.querySelectorAll('button')).find(
+                                b => b.title === '초심보기' ||
+                                     (b.textContent && b.textContent.trim().includes('초심보기'))
+                            );
+                            if (btn) { btn.click(); return true; }
+                            return false;
+                        }
+                    """)
+                    print(f"    버튼 클릭: {clicked}")
+                    if not clicked:
+                        print("❌ 초심보기 버튼 없음")
+                        return
 
-            if not btn_info.get('found'):
-                print("❌ 초심보기 버튼 없음!")
-                return
+                initial_content = await (await ri2.value).text()
+                print(f"[6] 초심 응답 캡처 완료 ({len(initial_content)}자)")
+                print(f"[6] 이때 요청 {len(captured_requests)}건:")
+                for r in captured_requests:
+                    print(f"    body={r['body'][:300]}")
 
-            # ── 클릭 ──
-            clicked = await page.evaluate("""
-                () => {
-                    const btn = Array.from(document.querySelectorAll('button')).find(
-                        b => b.title === '초심보기' ||
-                             (b.textContent && b.textContent.trim().includes('초심보기'))
-                    );
-                    if (btn) { btn.click(); return true; }
-                    return false;
-                }
-            """)
-            print(f"[10] 클릭 결과: {clicked}")
+                init_soup = BeautifulSoup(initial_content, 'html.parser')
+                m = init_soup.find('input', {'id': 'medi_numb'}) or init_soup.find('input', {'name': 'medi_numb'})
+                e = init_soup.find('input', {'id': 'even_numb'}) or init_soup.find('input', {'name': 'even_numb'})
+                g = init_soup.find('input', {'id': 'even_gubn'}) or init_soup.find('input', {'name': 'even_gubn'})
+                print(f"\n[7] 초심 AJAX hidden inputs:")
+                print(f"    even_numb={e.get('value') if e else '없음'}")
+                print(f"    medi_numb={m.get('value') if m else '없음'}")
+                print(f"    even_gubn={g.get('value') if g else '없음'}")
 
-            # ── even_gubn 폴링 ──
-            print("[11] even_gubn 폴링 시작 (최대 5초):")
-            final_gubn = None
-            for attempt in range(10):
-                await asyncio.sleep(0.5)
-                gubn_val = await page.evaluate("""
-                    () => {
-                        const el = document.querySelector('#even_gubn, input[name="even_gubn"]');
-                        return el ? el.value : 'NOT FOUND';
-                    }
-                """)
-                print(f"    [{attempt+1}] {(attempt+1)*0.5:.1f}s → even_gubn = {gubn_val}")
-                final_gubn = gubn_val
-                if gubn_val == 'JR':
-                    print(f"    ✅ JR 감지!")
-                    break
+                init_committee = extract_committee_from_detail(init_soup)
+                init_matter, _, init_matter_label, _ = extract_matter_and_summary(init_soup)
+                print(f"\n[8] 최종 결과:")
+                print(f"    초심 위원회  : {init_committee}")
+                print(f"    [{init_matter_label}]: {init_matter[:200]}...")
 
-            # ── .layer-cont 읽기 ──
-            print(f"\n[12] .layer-cont 읽기 (even_gubn 최종값: {final_gubn})")
-            popup_html = await page.evaluate("""
-                () => {
-                    const layerCont = document.querySelector('.layer-cont');
-                    if (layerCont) return { src: 'layer-cont', html: layerCont.outerHTML };
-                    const layerWrap = document.querySelector('.layer-wrap');
-                    if (layerWrap) return { src: 'layer-wrap', html: layerWrap.outerHTML };
-                    return null;
-                }
-            """)
-
-            if not popup_html:
-                print("❌ popup HTML 없음!")
-                return
-
-            print(f"    소스: {popup_html['src']}, HTML 길이: {len(popup_html['html'])}자")
-
-            init_soup = BeautifulSoup(popup_html['html'], 'html.parser')
-
-            # hidden inputs 재확인
-            medi2 = init_soup.find('input', {'id': 'medi_numb'}) or init_soup.find('input', {'name': 'medi_numb'})
-            even2 = init_soup.find('input', {'id': 'even_numb'}) or init_soup.find('input', {'name': 'even_numb'})
-            gubn2 = init_soup.find('input', {'id': 'even_gubn'}) or init_soup.find('input', {'name': 'even_gubn'})
-            print(f"\n[13] 초심 팝업 hidden inputs:")
-            print(f"    even_numb = {even2.get('value') if even2 else '없음'}")
-            print(f"    medi_numb = {medi2.get('value') if medi2 else '없음'}")
-            print(f"    even_gubn = {gubn2.get('value') if gubn2 else '없음'}")
-
-            init_committee = extract_committee_from_detail(init_soup)
-            init_matter, init_summary, init_matter_label, _ = extract_matter_and_summary(init_soup)
-
-            print(f"\n[14] 결과:")
-            print(f"    초심 위원회: {init_committee}")
-            print(f"    [{init_matter_label}]: {init_matter[:150]}...")
+            except Exception as e:
+                print(f"[6] expect_response 실패: {e}")
+                print(f"    이 시점까지 요청 {len(captured_requests)}건:")
+                for r in captured_requests:
+                    print(f"    body={r['body'][:300]}")
 
             print("\n✅ 테스트 완료")
 
         except Exception as e:
             import traceback
-            print(f"\n❌ 예외 발생: {e}")
+            print(f"\n❌ 예외: {e}")
             traceback.print_exc()
         finally:
             await browser.close()
