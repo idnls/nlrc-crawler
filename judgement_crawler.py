@@ -208,23 +208,20 @@ async def get_initial_case_number_via_js(page, current_case_number):
 async def get_initial_case_by_clicking(page):
     """
     현재 열린 팝업의 '초심보기' 버튼을 JS로 클릭하고,
-    DOM 직접 읽기로 위원회명 + 판정내용 추출.
+    even_gubn 폴링으로 DOM 교체를 확인한 뒤 .layer-cont를 직접 읽어 파싱.
 
-    ★ AJAX(expect_response) 방식을 버린 이유:
-      - page.expect_response("/detail.do")는 재심사건 상세보기 클릭 직후에도
-        /detail.do 응답이 큐에 남아 있어, 초심 클릭 전 응답을 잘못 캡처함.
-      - 결과적으로 항상 "중앙노동위원회" 응답이 잡힘.
+    ★ "재심보기 버튼 탐색" 방식을 버린 이유:
+      - 버튼 텍스트·타이틀이 변경되지 않거나 렌더링 타이밍 문제로 미검출되는 경우 발생.
 
-    ★ DOM 읽기 방식이 신뢰도 높은 이유:
-      - '초심보기' 클릭 → 팝업 DOM이 초심사건 내용으로 교체됨
-      - 교체 완료 시 "재심보기" 버튼이 DOM에 새로 나타남
-      - 이 버튼의 조상 중 layer/pop 클래스를 가진 컨테이너 = 팝업 전체 HTML
-      - 해당 HTML을 파싱하면 정확한 초심사건 위원회·내용을 얻을 수 있음
+    ★ even_gubn 폴링 방식이 신뢰도 높은 이유:
+      - 초심보기 클릭 → detailClick('JR') 실행 → AJAX 완료 후
+        hidden input even_gubn 값이 'JS'(재심) → 'JR'(초심)으로 반드시 변경됨.
+      - 이 변경을 감지하면 .layer-cont 내용이 초심사건으로 교체된 것이 확실.
 
     ★ 흐름:
       1) 초심보기 버튼 JS 클릭
-      2) 2초 대기 (AJAX + 렌더링)
-      3) DOM에서 '재심보기' 버튼 탐색 → 팝업 컨테이너 outerHTML 추출
+      2) even_gubn이 'JR'로 바뀔 때까지 0.5초 간격으로 폴링 (최대 5초)
+      3) .layer-cont outerHTML 추출
       4) BeautifulSoup 파싱 → 위원회·판정내용 추출
     """
     try:
@@ -233,7 +230,7 @@ async def get_initial_case_by_clicking(page):
             () => {
                 const btn = Array.from(document.querySelectorAll('button')).find(
                     b => b.title === '초심보기' ||
-                         (b.textContent && b.textContent.trim() === '초심보기')
+                         (b.textContent && b.textContent.trim().includes('초심보기'))
                 );
                 if (btn) { btn.click(); return true; }
                 return false;
@@ -243,43 +240,39 @@ async def get_initial_case_by_clicking(page):
             print("   ℹ️ 초심보기 버튼 없음 (초심사건 없음)")
             return None
 
-        # Step 2: AJAX 응답 + DOM 렌더링 대기
-        await asyncio.sleep(2)
+        # Step 2: even_gubn이 'JR'로 바뀔 때까지 폴링 (최대 5초)
+        # 초심보기(detailClick('JR')) 클릭 → AJAX 완료 → even_gubn = 'JR'
+        updated = False
+        for attempt in range(10):
+            await asyncio.sleep(0.5)
+            gubn = await page.evaluate("""
+                () => {
+                    const el = document.querySelector('#even_gubn, input[name="even_gubn"]');
+                    return el ? el.value : null;
+                }
+            """)
+            if gubn == 'JR':
+                updated = True
+                print(f"   ✅ DOM 교체 확인 (even_gubn=JR, {(attempt+1)*0.5:.1f}초 소요)")
+                break
 
-        # Step 3: '재심보기' 버튼이 나타났으면 팝업 컨테이너 HTML 추출
+        if not updated:
+            print("   ⚠️ 5초 내 even_gubn 변경 미감지 → 강제 진행")
+
+        # Step 3: .layer-cont 직접 읽기
         popup_html = await page.evaluate("""
             () => {
-                // 재심보기 버튼이 생기면 초심사건 뷰로 교체된 것
-                const btns = Array.from(document.querySelectorAll('button'));
-                const resimBtn = btns.find(
-                    b => b.title === '재심보기' ||
-                         (b.textContent && b.textContent.trim() === '재심보기')
-                );
-                if (!resimBtn) return null;
-
-                // 버튼 조상 중 layer/pop 클래스를 가진 컨테이너 탐색
-                let el = resimBtn.parentElement;
-                while (el && el.tagName !== 'BODY') {
-                    const cls = (el.className || '').toLowerCase();
-                    if (cls.includes('layer') || cls.includes('pop')) {
-                        return el.outerHTML;
-                    }
-                    el = el.parentElement;
-                }
-
-                // fallback: 가장 가까운 table의 부모
-                const tbl = resimBtn.closest('table');
-                if (tbl && tbl.parentElement) {
-                    return tbl.parentElement.outerHTML;
-                }
-
-                // 최후 fallback: body 전체
-                return document.body.innerHTML;
+                const layerCont = document.querySelector('.layer-cont');
+                if (layerCont) return layerCont.outerHTML;
+                // fallback: .layer-wrap 전체
+                const layerWrap = document.querySelector('.layer-wrap');
+                if (layerWrap) return layerWrap.outerHTML;
+                return null;
             }
         """)
 
         if not popup_html:
-            print("   ⚠️ 초심보기 클릭 후 재심보기 버튼 미검출 (DOM 교체 지연 or 구조 상이)")
+            print("   ⚠️ .layer-cont/.layer-wrap 미검출")
             return None
 
         # Step 4: 파싱
@@ -287,7 +280,7 @@ async def get_initial_case_by_clicking(page):
         committee = extract_committee_from_detail(initial_soup)
         matter, summary, matter_label, summary_label = extract_matter_and_summary(initial_soup)
 
-        print(f"   ✅ 초심사건 확보 (위원회: {committee}, 방식: DOM 직접 읽기)")
+        print(f"   ✅ 초심사건 확보 (위원회: {committee})")
         return {
             'committee': committee,
             'matter': matter,
@@ -507,12 +500,17 @@ async def main():
         items_to_send = all_results[:count] if is_test else all_results
 
         new_items = []
+        seen_case_numbers = set()   # 동일 실행 내 중복 방지
         now = datetime.now()
         for latest in reversed(items_to_send):
             if latest['case_number'] == '미검출': continue
+            if latest['case_number'] in seen_case_numbers:
+                print(f"   ⏭️ 중복 사건번호 스킵: {latest['case_number']}")
+                continue
             days_diff = (now - parse_date(latest['decision_date'])).days
             if is_test or (latest['case_number'] not in sent_cases and days_diff <= MAX_DAYS_OLD):
                 new_items.append(latest)
+                seen_case_numbers.add(latest['case_number'])
             elif not is_test and latest['case_number'] not in sent_cases:
                 sent_cases.add(latest['case_number'])
                 save_sent_cases(sent_cases)
