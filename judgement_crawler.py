@@ -1,16 +1,17 @@
 """
-test_initial_v3.py — 중앙노동위원회 재심 사건 1개에 대해 초심사건 정보를
-올바르게 가져오는지 집중 테스트.
+test_initial_v3.py — 초심사건 직접 fetch() 방식 검증 테스트.
 
-진단 항목:
-  A) 재심 AJAX 응답에서 파싱된 hidden_vals 전체 6개 필드
-  B) 초심보기 클릭 직전 DOM 상태 (어떤 필드가 존재하는가)
-  C) DOM 덮어쓰기 후 실제 어떤 필드가 설정됐는가
-  D) 초심보기 클릭 시 실제 전송되는 request body (POST 파라미터)
-  E) 캡처된 응답에 초심사건번호가 포함돼 있는가
-  F) 최종 파싱 결과 (위원회, 판정내용)
+확인 사항:
+  1) 재심 AJAX 응답(detail.do)에서 hidden_vals 6개 파싱 (A)
+  2) 직접 fetch()로 초심사건 조회: even_numb=medi_numb (B)
+  3) 응답에 초심사건번호 포함 여부 (C)
+  4) 초심 위원회명 파싱 (D)
 
-GitHub Actions 로그에서 A~F를 확인하고 어느 단계에서 실패하는지 판단.
+이전 테스트(v2, v3)에서 확인된 root cause:
+  - detailClick('JR')은 DOM의 stale 값(2022공정41 등)을 읽어 잘못된 요청 전송
+  - 버튼 클릭을 완전히 우회하고 직접 fetch()를 구성하면 해결 가능
+
+TARGET_CASE_TYPE: '부해' (JS계열) 또는 '차별' (DS계열) 모두 테스트 가능
 """
 
 import asyncio
@@ -18,7 +19,7 @@ import re
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
-TARGET_CASE_TYPE = '부해'   # 부해 = JS계열 / 차별 = DS계열 — 둘 다 테스트 가능
+TARGET_CASE_TYPE = '부해'   # '차별'로 바꿔서 DS계열도 확인 가능
 
 def extract_committee_from_detail(detail_soup):
     TITLE_TAGS = ['th', 'caption', 'h2', 'h3', 'h4']
@@ -49,9 +50,9 @@ async def main():
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
 
-        print(f"=== 테스트 시작: {TARGET_CASE_TYPE} 사건 중앙노동위원회 재심 1개 ===\n")
+        print(f"=== 테스트 시작: {TARGET_CASE_TYPE} 중앙노동위원회 재심 → 초심 직접 fetch ===\n")
 
-        # ── 1. 목록 페이지 로드 및 검색 ────────────────────────────────────
+        # ── 1. 검색 ─────────────────────────────────────────────────────────
         url = "https://nlrc.go.kr/nlrc/mainCase/judgment/search/index.do"
         await page.goto(url, wait_until="networkidle", timeout=60000)
         await page.fill('#pQuery', TARGET_CASE_TYPE)
@@ -71,7 +72,7 @@ async def main():
         dl_list = soup.find_all('dl', class_='C_Cts')
         print(f"[1] 목록 {len(dl_list)}건 발견")
 
-        # ── 2. 중앙노동위원회 재심 사건 1개 선택 ──────────────────────────
+        # ── 2. 중앙노동위원회 재심 + 초심사건 있는 케이스 선택 ───────────────
         target = None
         for dl in dl_list:
             dt = dl.find('dt', class_='tit')
@@ -98,7 +99,7 @@ async def main():
 
         print(f"[2] 선택된 재심 사건: {target['case_number']} / {target['committee']}\n")
 
-        # ── 3. 재심 상세 AJAX 캡처 ─────────────────────────────────────────
+        # ── 3. 재심 상세 AJAX 캡처 ──────────────────────────────────────────
         target_selector = f'a[data-k2="{target["case_number"]}"]'
         async with page.expect_response(
             lambda res: "/detail.do" in res.url and res.status == 200, timeout=15000
@@ -108,172 +109,100 @@ async def main():
 
         detail_soup = BeautifulSoup(detail_content, 'html.parser')
 
-        # ── A) hidden_vals 전체 출력 ───────────────────────────────────────
+        # ── [A] hidden_vals 파싱 ─────────────────────────────────────────────
         hidden_vals = extract_hidden_vals_from_soup(detail_soup)
-        print("=== [A] 재심 AJAX HTML에서 파싱된 hidden_vals ===")
+        print("=== [A] 재심 HTML → hidden_vals ===")
         for k, v in hidden_vals.items():
-            print(f"  {k} = {v!r}")
+            print(f"  {k:12s} = {v!r}")
 
         medi_numb = hidden_vals.get('medi_numb', '')
         even_numb = hidden_vals.get('even_numb', '')
+        even_gubn = hidden_vals.get('even_gubn', '')
 
         if not medi_numb or medi_numb == even_numb or medi_numb == target['case_number']:
-            print("\n[!] 초심사건번호(medi_numb) 미검출 또는 재심과 동일 → 초심 없음으로 판단 후 종료")
+            print("\n[!] 초심사건번호(medi_numb) 없음 또는 재심과 동일 → 초심 없음")
             await browser.close()
             return
 
-        print(f"\n  → 초심사건번호: {medi_numb}  /  재심사건번호: {even_numb}\n")
+        print(f"\n  → 재심: {even_numb} / 초심: {medi_numb} / 유형: {even_gubn}\n")
 
-        # ── 2초 대기 (배경 요청 안정화) ────────────────────────────────────
-        print("[*] 2초 대기 (배경 요청 안정화)...")
-        await asyncio.sleep(2)
+        # ── [B] 직접 fetch()로 초심사건 조회 ────────────────────────────────
+        print("=== [B] 직접 fetch() → 초심사건 조회 ===")
+        params = {
+            'type':        'brjuPoin',
+            'subType':     '06',
+            'even_gubn':   even_gubn,
+            'comm_code':   hidden_vals.get('comm_code', ''),
+            'begi_orga':   hidden_vals.get('begi_orga', ''),
+            'even_numb':   medi_numb,       # ★ 핵심: 초심사건번호로 교체
+            'resu_yeno':   '',
+            'midd_rscd':   hidden_vals.get('midd_rscd', ''),
+            'detail_gubn': '',
+        }
+        print(f"  요청 파라미터:")
+        for k, v in params.items():
+            print(f"    {k:12s} = {v!r}")
 
-        # ── B) 덮어쓰기 직전 DOM 상태 ──────────────────────────────────────
-        dom_before = await page.evaluate("""
-            () => {
-                const fields = ['medi_numb', 'begi_orga', 'even_numb', 'even_gubn', 'comm_code', 'midd_rscd'];
-                const result = {};
-                fields.forEach(f => {
-                    const el = document.querySelector('#' + f + ', input[name="' + f + '"]');
-                    result[f] = el ? el.value : null;
-                });
-                // 팝업 내 모든 hidden input도 확인
-                const allHidden = Array.from(document.querySelectorAll('.layer-wrap input[type=hidden], .layer-cont input[type=hidden]'))
-                                        .map(el => ({ id: el.id, name: el.name, value: el.value }));
-                return { fields: result, allHidden };
-            }
-        """)
-        print("=== [B] 덮어쓰기 직전 DOM 상태 ===")
-        for k, v in dom_before['fields'].items():
-            print(f"  {k} = {v!r}")
-        print(f"  팝업 내 hidden inputs ({len(dom_before['allHidden'])}개):")
-        for h in dom_before['allHidden']:
-            print(f"    id={h['id']!r} name={h['name']!r} value={h['value']!r}")
-
-        # ── C) DOM 덮어쓰기 ────────────────────────────────────────────────
-        set_result = await page.evaluate("""
-            (vals) => {
-                const set_fields = [];
-                const not_found = [];
-                for (const [field, value] of Object.entries(vals)) {
-                    const el = document.querySelector('#' + field + ', input[name="' + field + '"]');
-                    if (el) {
-                        el.value = value;
-                        set_fields.push({ field, old: el.defaultValue, new: el.value });
-                    } else {
-                        not_found.push(field);
+        initial_content = await page.evaluate("""
+            async (params) => {
+                const formData = new URLSearchParams(params);
+                const response = await fetch(
+                    '/nlrc/mainCase/judgment/search/detail.do',
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: formData.toString()
                     }
-                }
-                return { set_fields, not_found };
-            }
-        """, hidden_vals)
-        print("\n=== [C] DOM 덮어쓰기 결과 ===")
-        print(f"  설정 성공 ({len(set_result['set_fields'])}개): {[x['field'] for x in set_result['set_fields']]}")
-        print(f"  미검출 ({len(set_result['not_found'])}개): {set_result['not_found']}")
-
-        # ── 초심보기 버튼 확인 ─────────────────────────────────────────────
-        btn_info = await page.evaluate("""
-            () => {
-                const btn = Array.from(document.querySelectorAll('button')).find(
-                    b => b.title === '초심보기' ||
-                         (b.textContent && b.textContent.trim().includes('초심보기'))
                 );
-                return btn ? { found: true, title: btn.title, onclick: btn.getAttribute('onclick'), text: btn.textContent.trim() } : { found: false };
+                return await response.text();
             }
-        """)
-        print(f"\n  초심보기 버튼: {btn_info}")
+        """, params)
 
-        if not btn_info['found']:
-            print("[!] 초심보기 버튼 없음 → 종료")
-            await browser.close()
-            return
+        print(f"\n  응답 길이: {len(initial_content)}자")
 
-        # ── D) 초심보기 클릭 시 실제 request body 캡처 ─────────────────────
-        print("\n=== [D] 초심보기 클릭 request body ===")
-        captured_requests = []
+        # ── [C] 응답 검증 ────────────────────────────────────────────────────
+        print(f"\n=== [C] 응답 검증 ===")
+        print(f"  초심사건번호({medi_numb}) 포함: {medi_numb in initial_content}")
+        print(f"  재심사건번호({even_numb}) 포함: {even_numb in initial_content}")
 
-        def on_request(req):
-            if '/detail.do' in req.url:
-                try:
-                    captured_requests.append({
-                        'url': req.url,
-                        'method': req.method,
-                        'body': req.post_data
-                    })
-                except Exception as e:
-                    captured_requests.append({'error': str(e)})
+        # 응답 HTML hidden_vals 확인
+        resp_soup = BeautifulSoup(initial_content, 'html.parser')
+        resp_hidden = extract_hidden_vals_from_soup(resp_soup)
+        print(f"  응답 HTML hidden_vals:")
+        for k, v in resp_hidden.items():
+            print(f"    {k:12s} = {v!r}")
 
-        page.on('request', on_request)
+        # ── [D] 위원회 + 판정내용 파싱 ───────────────────────────────────────
+        print(f"\n=== [D] 파싱 결과 ===")
+        committee = extract_committee_from_detail(resp_soup)
+        print(f"  위원회: {committee}")
 
-        # ── E) expect_response로 응답 캡처 ────────────────────────────────
-        initial_content = None
-        try:
-            async with page.expect_response(
-                lambda res: "/detail.do" in res.url and res.status == 200,
-                timeout=15000
-            ) as resp_info:
-                await page.evaluate("""
-                    () => {
-                        const btn = Array.from(document.querySelectorAll('button')).find(
-                            b => b.title === '초심보기' ||
-                                 (b.textContent && b.textContent.trim().includes('초심보기'))
-                        );
-                        if (btn) btn.click();
-                    }
-                """)
-                initial_content = await (await resp_info.value).text()
-        except Exception as e:
-            print(f"  ⚠️ expect_response 실패: {e}")
-
-        page.remove_listener('request', on_request)
-
-        # 1초 추가 대기 후 남은 요청 확인
-        await asyncio.sleep(1)
-
-        print(f"  클릭 이후 /detail.do 요청 수: {len(captured_requests)}")
-        for i, req in enumerate(captured_requests):
-            print(f"  [요청 {i+1}] url={req.get('url','?')}")
-            body = req.get('body', '')
-            if body:
-                # URL 디코딩해서 출력
-                from urllib.parse import unquote_plus
-                decoded = unquote_plus(body)
-                print(f"          body: {decoded[:300]}")
-
-        # ── E) 응답 검증 ───────────────────────────────────────────────────
-        print(f"\n=== [E] 캡처된 응답 검증 ===")
-        if initial_content:
-            print(f"  응답 길이: {len(initial_content)}자")
-            print(f"  초심사건번호({medi_numb}) 포함 여부: {medi_numb in initial_content}")
-            print(f"  재심사건번호({even_numb}) 포함 여부: {even_numb in initial_content}")
-
-            # ── F) 파싱 결과 ─────────────────────────────────────────────
-            print(f"\n=== [F] 파싱 결과 ===")
-            initial_soup = BeautifulSoup(initial_content, 'html.parser')
-            committee = extract_committee_from_detail(initial_soup)
-            print(f"  위원회: {committee}")
-
-            # 응답 내 hidden inputs 확인
-            resp_hidden = extract_hidden_vals_from_soup(initial_soup)
-            print(f"  응답 HTML hidden_vals:")
-            for k, v in resp_hidden.items():
-                print(f"    {k} = {v!r}")
-
-            # 위원회 판정요지 th 태그들
-            th_texts = [th.get_text(strip=True) for th in initial_soup.find_all('th') if '노동위원회' in th.get_text()]
-            print(f"  위원회 관련 th 태그들: {th_texts}")
-
-            # 응답이 올바른 초심 사건인지 판단
-            if medi_numb in initial_content:
-                print(f"\n✅ 초심사건번호({medi_numb})가 응답에 포함됨 → 올바른 초심 응답")
-            else:
-                print(f"\n❌ 초심사건번호({medi_numb})가 응답에 없음 → 잘못된 응답 (배경 요청 캡처 가능성)")
-                # 응답 앞부분 출력
-                print(f"  응답 앞 200자: {initial_content[:200]!r}")
+        # 판정사항/결정사항 th
+        matter_th = None
+        for kw in ['판정사항', '결정사항']:
+            matter_th = resp_soup.find('th', string=kw)
+            if matter_th:
+                break
+        if matter_th:
+            td = matter_th.find_next('td')
+            matter_text = td.get_text(separator=' ', strip=True)[:100] if td else '없음'
+            print(f"  판정사항 앞 100자: {matter_text}")
         else:
-            print("  ❌ 응답 캡처 실패")
+            print("  판정사항 th 미검출")
 
-        print("\n=== 테스트 완료 ===")
+        # ── 최종 판정 ────────────────────────────────────────────────────────
+        print(f"\n{'='*50}")
+        if medi_numb in initial_content and committee and '중앙' not in committee:
+            print(f"✅ 성공: 초심사건({medi_numb}) 정상 조회, 위원회={committee}")
+        elif medi_numb in initial_content and committee:
+            print(f"⚠️ 주의: 초심사건번호는 응답에 있으나 위원회={committee} (중앙 표시)")
+        elif committee:
+            print(f"❌ 실패: 초심사건번호가 응답에 없음, 위원회={committee}")
+        else:
+            print(f"❌ 실패: 위원회 미검출")
+
+        print(f"{'='*50}")
+
         await browser.close()
 
 if __name__ == "__main__":
