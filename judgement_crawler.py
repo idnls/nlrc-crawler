@@ -140,13 +140,17 @@ async def main():
 
         # ── [B] 직접 fetch()로 초심사건 조회 ────────────────────────────────
         print("=== [B] 직접 fetch() → 초심사건 조회 ===")
+        # ★ comm_code = begi_orga: detailClick('JR')이 내부적으로 하는 교체
+        #   재심: comm_code='00'(중앙), begi_orga='09'(강원)
+        #   초심 fetch: comm_code='09' → 강원지방노동위원회 라우팅
+        begi_orga = hidden_vals.get('begi_orga', '')
         params = {
             'type':        'brjuPoin',
             'subType':     '06',
-            'even_gubn':   initial_gubn,  # ★ 핵심: 초심 코드(JR/DR) 사용 (재심 JS/DS 아님)
-            'comm_code':   hidden_vals.get('comm_code', ''),
-            'begi_orga':   hidden_vals.get('begi_orga', ''),
-            'even_numb':   medi_numb,       # ★ 핵심: 초심사건번호로 교체
+            'even_gubn':   initial_gubn,  # ★ 초심 코드(JR/DR)
+            'comm_code':   begi_orga,     # ★ begi_orga 값으로 교체 (지방위원회 라우팅)
+            'begi_orga':   begi_orga,
+            'even_numb':   medi_numb,     # ★ 초심사건번호
             'resu_yeno':   '',
             'midd_rscd':   hidden_vals.get('midd_rscd', ''),
             'detail_gubn': '',
