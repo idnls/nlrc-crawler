@@ -114,6 +114,20 @@ def extract_matter_and_summary(detail_soup):
 
     return matter_text, summary_text, matter_label, summary_label
 
+def extract_committee_from_detail(detail_soup):
+    """
+    detail.do 응답 HTML에서 위원회 이름 추출.
+    팝업 상단에 "강원지방노동위원회 판정요지" 형식의 th/caption/h2 태그 탐색.
+    """
+    for tag in detail_soup.find_all(['th', 'caption', 'h2', 'h3', 'h4', 'td']):
+        text = tag.get_text(strip=True)
+        if '노동위원회' in text:
+            # "강원지방노동위원회 판정요지" → "강원지방노동위원회"
+            match = re.match(r'(.+노동위원회)', text)
+            if match:
+                return match.group(1).strip()
+    return None
+
 def extract_initial_case_from_html(html_content, current_case_number):
     """
     detail.do AJAX 응답 HTML에서 초심사건번호 추출.
@@ -223,6 +237,14 @@ async def fetch_initial_case_details(browser, case_number):
 
             detail_soup = BeautifulSoup(detail_content, 'html.parser')
             matter, summary, matter_label, summary_label = extract_matter_and_summary(detail_soup)
+
+            # ★ 위원회명: detail HTML에서 직접 추출 (리스트 추출보다 정확)
+            committee_from_detail = extract_committee_from_detail(detail_soup)
+            if committee_from_detail:
+                committee = committee_from_detail
+                print(f"   ✅ 위원회명 추출 (detail HTML): {committee}")
+            else:
+                print(f"   ℹ️ 위원회명 detail 추출 실패, 리스트 결과 사용: {committee}")
 
             print(f"   ✅ 초심사건 상세 확보 (위원회: {committee})")
             return {
@@ -489,9 +511,14 @@ async def main():
                 f"📅 판정일: {latest['decision_date']}\n"
                 f"⚖️ 판정결과: {latest['decision_result']}\n"
                 f"📝 제목: {latest['title']}\n\n"
-                f"✅ [{matter_label}]\n{latest['decision_matter']}\n\n"
-                f"📖 [{summary_label}]\n{latest['decision_summary']}"
+                f"✅ [{matter_label}]\n{latest['decision_matter']}"
             )
+            # 판정사건: 판정요지 항상 표시 (없으면 "상세 내용 없음")
+            # 결정사건: 결정요지가 실제로 있을 때만 표시 (없으면 아예 생략)
+            if matter_label == '판정사항':
+                message += f"\n\n📖 [{summary_label}]\n{latest['decision_summary']}"
+            elif latest['decision_summary'] != '상세 내용 없음':
+                message += f"\n\n📖 [{summary_label}]\n{latest['decision_summary']}"
 
             sent_ids = send_telegram_message(message)
 
@@ -511,10 +538,11 @@ async def main():
                 else:
                     reply_message += "\n"
 
-                reply_message += (
-                    f"✅ [{init_matter_label}]\n{initial_data['matter']}\n\n"
-                    f"📖 [{init_summary_label}]\n{initial_data['summary']}"
-                )
+                reply_message += f"✅ [{init_matter_label}]\n{initial_data['matter']}"
+                if init_matter_label == '판정사항':
+                    reply_message += f"\n\n📖 [{init_summary_label}]\n{initial_data['summary']}"
+                elif initial_data['summary'] != '상세 내용 없음':
+                    reply_message += f"\n\n📖 [{init_summary_label}]\n{initial_data['summary']}"
 
                 send_telegram_message(reply_message, reply_to_message_ids=sent_ids)
                 print(f"   💬 초심사건 댓글 전송 완료")
