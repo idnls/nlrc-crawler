@@ -14,15 +14,8 @@ try:
 except ImportError:
     pass
 
-# ==========================================
-# 1. 텔레그램 봇 설정 (환경 변수)
-# ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-
-# CHAT_ID를 쉼표로 구분하여 여러 개 지원
-# 예: "6517178136,-1001234567890"
 CHAT_IDS = [cid.strip() for cid in (os.environ.get('CHAT_ID') or '').split(',') if cid.strip()]
-
 LAST_CASE_FILE = "last_case.json"
 CASE_CATEGORIES = ['부해', '부노', '차별', '교섭', '단위', '공정', '단협', '손해', '의결', '휴업', '재해', '상병', '노협']
 MAX_DAYS_OLD = 60
@@ -34,17 +27,20 @@ def clean_text(text):
     lines = [line.strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line).strip()
 
+def get_committee_abbr(committee_name):
+    """위원회 이름 앞 2자 추출 (충남지방노동위원회 → 충남)"""
+    if not committee_name:
+        return ''
+    return committee_name[:2]
+
 def send_telegram_message(text, reply_to_message_ids=None):
     """
-    텔레그램으로 메시지 전송.
-    reply_to_message_ids: {chat_id: message_id} 형태로 전달하면 해당 메시지의 댓글(답글)로 전송.
-    반환값: {chat_id: first_message_id} — 나중에 댓글 달 때 사용.
+    텔레그램 메시지 전송.
+    reply_to_message_ids: {chat_id: message_id} → 해당 메시지의 댓글(답글)로 전송.
+    반환값: {chat_id: first_message_id}
     """
-    if not TELEGRAM_TOKEN:
-        print("⚠️ TELEGRAM_TOKEN이 설정되지 않았습니다.")
-        return {}
-    if not CHAT_IDS:
-        print("⚠️ CHAT_ID가 설정되지 않았습니다.")
+    if not TELEGRAM_TOKEN or not CHAT_IDS:
+        print("⚠️ TELEGRAM_TOKEN 또는 CHAT_ID 미설정")
         return {}
 
     MAX_LENGTH = 4000
@@ -59,49 +55,33 @@ def send_telegram_message(text, reply_to_message_ids=None):
     parts.append(remaining)
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    sent_message_ids = {}  # {chat_id: first_message_id}
+    sent_message_ids = {}
 
     for chat_id in CHAT_IDS:
         print(f"📡 [{chat_id}] 전송 시작...")
-        first_msg_id = None
-
         for i, part in enumerate(parts):
-            message_to_send = part
-            if len(parts) > 1:
-                message_to_send = f"[{i+1}/{len(parts)}]\n" + part
-
-            payload = {
-                'chat_id': chat_id,
-                'text': message_to_send
-            }
-
-            # 첫 번째 파트에만 reply_to 적용
+            message_to_send = f"[{i+1}/{len(parts)}]\n" + part if len(parts) > 1 else part
+            payload = {'chat_id': chat_id, 'text': message_to_send}
             if i == 0 and reply_to_message_ids and chat_id in reply_to_message_ids:
                 payload['reply_to_message_id'] = reply_to_message_ids[chat_id]
-
             try:
                 response = requests.post(url, data=payload)
                 response.raise_for_status()
                 res_data = response.json()
                 if res_data.get('ok') and i == 0:
-                    first_msg_id = res_data['result']['message_id']
-                    sent_message_ids[chat_id] = first_msg_id
+                    sent_message_ids[chat_id] = res_data['result']['message_id']
                 print(f"  ✅ [{chat_id}] 파트 {i+1}/{len(parts)} 전송 성공!")
             except Exception as e:
                 print(f"  ❌ [{chat_id}] 파트 {i+1} 전송 실패: {e}")
-                if hasattr(e, 'response') and e.response is not None:
-                    print(f"     응답 내용: {e.response.text}")
-
     return sent_message_ids
 
 def extract_matter_and_summary(detail_soup):
-    """판정사항/결정사항, 판정요지/결정요지 추출 (두 가지 명칭 모두 지원)"""
+    """판정사항/결정사항, 판정요지/결정요지 추출"""
     matter_text = '상세 내용 없음'
     summary_text = '상세 내용 없음'
     matter_label = '판정사항'
     summary_label = '판정요지'
 
-    # 판정사항 또는 결정사항
     matter_th = None
     for keyword in ['판정사항', '결정사항']:
         matter_th = (
@@ -111,13 +91,11 @@ def extract_matter_and_summary(detail_soup):
         if matter_th:
             matter_label = keyword
             break
-
     if matter_th:
-        matter_td = matter_th.find_next('td')
-        if matter_td:
-            matter_text = clean_text(matter_td.get_text(separator="\n"))
+        td = matter_th.find_next('td')
+        if td:
+            matter_text = clean_text(td.get_text(separator="\n"))
 
-    # 판정요지 또는 결정요지
     summary_th = None
     for keyword in ['판정요지', '결정요지']:
         summary_th = detail_soup.find('th', string=keyword)
@@ -129,79 +107,134 @@ def extract_matter_and_summary(detail_soup):
         if summary_th:
             summary_label = keyword
             break
-
     if summary_th:
-        summary_td = summary_th.find_next('td')
-        if summary_td:
-            summary_text = clean_text(summary_td.get_text(separator="\n"))
+        td = summary_th.find_next('td')
+        if td:
+            summary_text = clean_text(td.get_text(separator="\n"))
 
     return matter_text, summary_text, matter_label, summary_label
 
-async def try_get_initial_case_info(page, current_case_number, committee):
+async def get_initial_case_number_via_js(page, current_case_number):
     """
-    중앙노동위원회 재심판정에 한해 초심보기 버튼 클릭으로
-    초심사건번호 + 판정사항/요지 추출.
-    반환: (case_number, {matter, summary, matter_label, summary_label}) or (None, None)
+    JavaScript로 현재 페이지에 열린 팝업의 초심보기 버튼 onclick 값에서
+    사건번호 추출 (클릭 없이 DOM 직접 조회).
     """
-    # 중앙노동위원회 재심판정에만 적용
-    if '중앙' not in committee:
-        return None, None
-
     try:
-        chosim_btn = page.locator('button:has-text("초심보기"), a:has-text("초심보기")')
-        btn_count = await chosim_btn.count()
+        btn_info = await page.evaluate("""
+            () => {
+                const allBtns = Array.from(document.querySelectorAll('button, a, input[type="button"]'));
+                const chosimBtn = allBtns.find(b =>
+                    b.textContent && b.textContent.trim().includes('초심보기')
+                );
+                if (!chosimBtn) return null;
+                return {
+                    onclick: chosimBtn.getAttribute('onclick') || '',
+                    href:    chosimBtn.getAttribute('href')    || '',
+                    value:   chosimBtn.getAttribute('value')   || '',
+                    data:    JSON.stringify(chosimBtn.dataset  || {})
+                };
+            }
+        """)
 
-        if btn_count == 0:
+        if not btn_info:
             print("   ℹ️ 초심보기 버튼 없음")
-            return None, None
+            return None
 
-        print("   🔍 초심보기 버튼 클릭 시도...")
+        combined = btn_info.get('onclick', '') + btn_info.get('href', '') + \
+                   btn_info.get('value', '') + btn_info.get('data', '')
+        print(f"   🔍 초심보기 버튼 발견: {combined[:100]}")
 
-        async with page.expect_response(
-            lambda res: "/detail.do" in res.url and res.status == 200,
-            timeout=15000
-        ) as init_resp_info:
-            await chosim_btn.first.click(force=True)
-            init_resp = await init_resp_info.value
-            init_content = await init_resp.text()
-
-        init_soup = BeautifulSoup(init_content, 'html.parser')
-
-        # 초심사건번호 추출: "사건 : XXXX" 패턴
-        initial_case_number = None
-        for node in init_soup.find_all(string=re.compile(r'사건\s*:')):
-            match = re.search(r'사건\s*:\s*([0-9]{4}[가-힣]{1,4}[0-9]+)', node)
-            if match and match.group(1) != current_case_number:
-                initial_case_number = match.group(1)
-                break
-
-        # 위 방법 실패 시 전체 HTML에서 패턴 검색
-        if not initial_case_number:
-            matches = re.findall(r'([0-9]{4}[가-힣]{1,4}[0-9]+)', init_content)
+        # 따옴표 안 사건번호 우선
+        for pattern in [
+            r"'([0-9]{4}[가-힣]{1,4}[0-9]+)'",
+            r'"([0-9]{4}[가-힣]{1,4}[0-9]+)"',
+            r'([0-9]{4}[가-힣]{1,4}[0-9]+)'
+        ]:
+            matches = re.findall(pattern, combined)
             for m in matches:
                 if m != current_case_number:
-                    initial_case_number = m
-                    break
+                    print(f"   🔗 초심사건번호 추출: {m}")
+                    return m
 
-        if not initial_case_number:
-            print("   ⚠️ 초심사건번호 추출 실패")
-            return None, None
-
-        print(f"   🔗 초심사건번호: {initial_case_number}")
-
-        # 초심 판정사항/요지 추출
-        matter, summary, matter_label, summary_label = extract_matter_and_summary(init_soup)
-
-        return initial_case_number, {
-            'matter': matter,
-            'summary': summary,
-            'matter_label': matter_label,
-            'summary_label': summary_label
-        }
-
+        print("   ⚠️ 초심사건번호 파싱 실패")
+        return None
     except Exception as e:
-        print(f"   ⚠️ 초심보기 클릭 실패: {e}")
-        return None, None
+        print(f"   ⚠️ JS 실행 오류: {e}")
+        return None
+
+async def fetch_initial_case_details(browser, case_number):
+    """
+    별도 탭을 열어 초심사건을 검색하고 위원회명 + 판정내용을 가져옴.
+    반환: {'committee': ..., 'matter': ..., 'summary': ..., 'matter_label': ..., 'summary_label': ...}
+    """
+    page = await browser.new_page()
+    try:
+        url = "https://nlrc.go.kr/nlrc/mainCase/judgment/search/index.do"
+        print(f"   🔎 초심사건 별도 검색: {case_number}")
+        await page.goto(url, wait_until="networkidle", timeout=60000)
+        await page.fill('#pQuery', case_number)
+        await page.focus('#pQuery')
+        await page.keyboard.press('Enter')
+
+        try:
+            async with page.expect_response(
+                lambda res: "/list.do" in res.url and res.status == 200, timeout=15000
+            ) as resp_info:
+                await page.click('.btnSearch')
+                list_content = await (await resp_info.value).text()
+        except:
+            list_content = await page.content()
+
+        list_soup = BeautifulSoup(list_content, 'html.parser')
+        committee = None
+
+        # 위원회 이름 추출
+        for dl in list_soup.find_all('dl', class_='C_Cts'):
+            dt = dl.find('dt', class_='tit')
+            if dt:
+                a_tag = dt.find('a')
+                if a_tag:
+                    spans = a_tag.find_all('span')
+                    if spans and case_number in clean_text(spans[0].get_text()):
+                        strong = a_tag.find('strong')
+                        if strong:
+                            committee = clean_text(strong.get_text())
+                        break
+
+        # 상세 내용 클릭
+        target_selector = f'a[data-k2="{case_number}"]'
+        try:
+            async with page.expect_response(
+                lambda res: "/detail.do" in res.url and res.status == 200, timeout=15000
+            ) as det_info:
+                await page.click(target_selector, force=True)
+                detail_content = await (await det_info.value).text()
+
+            detail_soup = BeautifulSoup(detail_content, 'html.parser')
+            matter, summary, matter_label, summary_label = extract_matter_and_summary(detail_soup)
+
+            print(f"   ✅ 초심사건 상세 확보 (위원회: {committee})")
+            return {
+                'committee': committee,
+                'matter': matter,
+                'summary': summary,
+                'matter_label': matter_label,
+                'summary_label': summary_label
+            }
+        except Exception as e:
+            print(f"   ⚠️ 초심사건 상세 클릭 실패: {e}")
+            return {
+                'committee': committee,
+                'matter': '상세 내용 없음',
+                'summary': '상세 내용 없음',
+                'matter_label': '판정사항',
+                'summary_label': '판정요지'
+            }
+    except Exception as e:
+        print(f"   ⚠️ 초심사건 별도 검색 실패: {e}")
+        return None
+    finally:
+        await page.close()
 
 async def get_recent_judgments(search_keyword='부해', count=1):
     async with async_playwright() as p:
@@ -209,14 +242,13 @@ async def get_recent_judgments(search_keyword='부해', count=1):
         try:
             browser = await p.chromium.launch(headless=True, channel="chrome", args=chrome_args)
         except Exception as e:
-            print(f"⚠️ 시스템 Chrome 실행 실패, 기본 Chromium으로 대체: {e}")
+            print(f"⚠️ Chrome 실패, Chromium 대체: {e}")
             browser = await p.chromium.launch(headless=True, args=chrome_args)
 
         page = await browser.new_page()
-
         try:
             url = "https://nlrc.go.kr/nlrc/mainCase/judgment/search/index.do"
-            print(f"🌐 {url} (키워드: {search_keyword}, 목표: {count}건)")
+            print(f"🌐 {url} (키워드: {search_keyword}, {count}건)")
             await page.goto(url, wait_until="networkidle", timeout=60000)
             await page.fill('#pQuery', search_keyword)
             await page.focus('#pQuery')
@@ -232,12 +264,13 @@ async def get_recent_judgments(search_keyword='부해', count=1):
             }''')
 
             try:
-                async with page.expect_response(lambda res: "/list.do" in res.url and res.status == 200, timeout=30000) as response_info:
+                async with page.expect_response(
+                    lambda res: "/list.do" in res.url and res.status == 200, timeout=30000
+                ) as response_info:
                     await page.click('.btnSearch')
-                    list_resp = await response_info.value
-                    list_content = await list_resp.text()
+                    list_content = await (await response_info.value).text()
             except:
-                print("⚠️ 응답 대기 초과, 현재 페이지로 진행")
+                print("⚠️ 응답 대기 초과")
                 list_content = await page.content()
 
             soup = BeautifulSoup(list_content, 'html.parser')
@@ -257,6 +290,7 @@ async def get_recent_judgments(search_keyword='부해', count=1):
                     'matter_label': '판정사항',
                     'summary_label': '판정요지',
                     'initial_case': None,
+                    'initial_case_display': None,
                     'initial_case_data': None
                 }
                 dt = dl.find('dt', class_='tit')
@@ -280,40 +314,60 @@ async def get_recent_judgments(search_keyword='부해', count=1):
                 except: return datetime.min
 
             judgments.sort(key=lambda x: parse_date(x['decision_date']), reverse=True)
-
             final_results = []
+
             for i, item in enumerate(judgments[:count]):
-                print(f"🔎 [{i+1}/{count}] {item['case_number']} 처리 중...")
+                print(f"🔎 [{i+1}/{count}] {item['case_number']} ({item['committee']}) 처리 중...")
                 try:
                     target_selector = f'a[data-k2="{item["case_number"]}"]'
 
-                    # 재심 상세 정보 캡처
-                    async with page.expect_response(lambda res: "/detail.do" in res.url and res.status == 200, timeout=15000) as response_info:
+                    # 재심 상세 정보 캡처 (원본 방식 유지)
+                    async with page.expect_response(
+                        lambda res: "/detail.do" in res.url and res.status == 200, timeout=15000
+                    ) as response_info:
                         await page.click(target_selector, force=True)
-                        detail_resp_obj = await response_info.value
-                        detail_content = await detail_resp_obj.text()
+                        detail_content = await (await response_info.value).text()
 
                     detail_soup = BeautifulSoup(detail_content, 'html.parser')
-
                     matter, summary, matter_label, summary_label = extract_matter_and_summary(detail_soup)
                     item['decision_matter'] = matter
                     item['decision_summary'] = summary
                     item['matter_label'] = matter_label
                     item['summary_label'] = summary_label
 
-                    # 중앙노동위원회만 초심보기 시도
-                    initial_case, initial_data = await try_get_initial_case_info(
-                        page, item['case_number'], item['committee']
-                    )
-                    item['initial_case'] = initial_case
-                    item['initial_case_data'] = initial_data
+                    # 중앙노동위원회 재심판정만 초심사건 처리
+                    if '중앙' in item['committee']:
+                        # ★ JS로 현재 팝업의 초심보기 버튼 onclick에서 사건번호 추출 (클릭 X)
+                        await asyncio.sleep(1)  # DOM 업데이트 대기
+                        initial_case_number = await get_initial_case_number_via_js(
+                            page, item['case_number']
+                        )
+
+                        if initial_case_number:
+                            # ★ 별도 탭에서 초심사건 검색 (상태 오염 없음)
+                            initial_data = await fetch_initial_case_details(browser, initial_case_number)
+                            item['initial_case'] = initial_case_number
+
+                            if initial_data and initial_data.get('committee'):
+                                abbr = get_committee_abbr(initial_data['committee'])
+                                item['initial_case_display'] = f"{abbr} {initial_case_number}"
+                            else:
+                                item['initial_case_display'] = initial_case_number
+
+                            item['initial_case_data'] = initial_data
+                        else:
+                            item['initial_case'] = None
+                            item['initial_case_display'] = None
+                            item['initial_case_data'] = None
 
                     final_results.append(item)
-                    print(f"   ✅ 완료 (초심: {initial_case or '없음'})")
+                    print(f"   ✅ 완료 (초심: {item.get('initial_case_display') or '없음'})")
 
                     # 팝업 닫기
                     await page.evaluate("""
-                        document.querySelectorAll('.layer-wrap, .layer-bg, .dimmed, .layer-close, .btnClose').forEach(el => el.remove());
+                        document.querySelectorAll(
+                            '.layer-wrap, .layer-bg, .dimmed, .layer-close, .btnClose'
+                        ).forEach(el => el.remove());
                         document.body.classList.remove('layer-open');
                         document.documentElement.style.overflow = 'auto';
                     """)
@@ -394,7 +448,9 @@ async def main():
         sent_count = len(new_items)
 
         if sent_count > 0 and not is_test:
-            send_telegram_message(f"🔔 이번 주 노동위원회 판정·결정요지 신규 업데이트는 총 {sent_count}건입니다.")
+            send_telegram_message(
+                f"🔔 이번 주 노동위원회 판정·결정요지 신규 업데이트는 총 {sent_count}건입니다."
+            )
 
         for latest in new_items:
             print(f"🎉 발송: {latest['case_number']} ({latest['committee']})")
@@ -402,14 +458,15 @@ async def main():
             matter_label = latest.get('matter_label', '판정사항')
             summary_label = latest.get('summary_label', '판정요지')
 
-            # ① 재심 메시지 작성
+            # ① 재심 메시지
             message = (
                 f"🚨 [노동위원회 판정·결정요지 신규 업데이트]\n\n"
                 f"🏢 위원회: {latest['committee']}\n"
                 f"🔢 사건번호: {latest['case_number']}\n"
             )
-            if latest.get('initial_case'):
-                message += f"🔗 초심사건번호: {latest['initial_case']}\n"
+            if latest.get('initial_case_display'):
+                message += f"🔗 초심사건: {latest['initial_case_display']}\n"
+
             message += (
                 f"📅 판정일: {latest['decision_date']}\n"
                 f"⚖️ 판정결과: {latest['decision_result']}\n"
@@ -418,22 +475,29 @@ async def main():
                 f"📖 [{summary_label}]\n{latest['decision_summary']}"
             )
 
-            # ① 재심 메시지 전송 → 메시지 ID 반환
             sent_ids = send_telegram_message(message)
 
-            # ② 초심사건 데이터가 있으면 재심 메시지에 댓글(답글)로 전송
+            # ② 초심사건 데이터 있으면 댓글(답글)로 전송
             if sent_ids and latest.get('initial_case') and latest.get('initial_case_data'):
                 initial_data = latest['initial_case_data']
+                init_committee = initial_data.get('committee', '')
+                init_abbr = get_committee_abbr(init_committee) if init_committee else ''
                 init_matter_label = initial_data.get('matter_label', '판정사항')
                 init_summary_label = initial_data.get('summary_label', '판정요지')
 
                 reply_message = (
-                    f"🔍 [초심사건 정보: {latest['initial_case']}]\n\n"
+                    f"🔍 [초심사건 정보: {latest['initial_case_display']}]\n"
+                )
+                if init_committee:
+                    reply_message += f"🏢 위원회: {init_committee}\n\n"
+                else:
+                    reply_message += "\n"
+
+                reply_message += (
                     f"✅ [{init_matter_label}]\n{initial_data['matter']}\n\n"
                     f"📖 [{init_summary_label}]\n{initial_data['summary']}"
                 )
 
-                # sent_ids를 reply_to로 전달 → 댓글 형태로 전송
                 send_telegram_message(reply_message, reply_to_message_ids=sent_ids)
                 print(f"   💬 초심사건 댓글 전송 완료")
 
