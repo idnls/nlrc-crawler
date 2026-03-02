@@ -187,87 +187,53 @@ async def get_initial_case_number_via_js(page, current_case_number):
         print(f"   ⚠️ JS DOM 오류: {e}")
         return None
 
-async def fetch_initial_case_details(browser, case_number):
+async def get_initial_case_by_clicking(page):
     """
-    별도 탭을 열어 초심사건을 검색하고 위원회명 + 판정내용을 가져옴.
-    반환: {'committee': ..., 'matter': ..., 'summary': ..., 'matter_label': ..., 'summary_label': ...}
+    현재 열린 팝업의 '초심보기' 버튼을 JS로 클릭하고,
+    detail.do AJAX 응답에서 위원회명 + 판정내용을 직접 추출.
+
+    ★ 이 방식이 가장 정확한 이유:
+      - 같은 사건번호(예: 2025부해381)가 전북/전남/경남 등 여러 위원회에 존재할 수 있음
+      - 사이트의 '초심보기' 버튼 자체가 hidden input(begi_orga 등)을 이용해
+        정확한 위원회의 AJAX 요청을 만들어냄
+      - 따라서 버튼을 클릭해서 나오는 AJAX 응답이 항상 정확한 초심사건 정보를 담음
     """
-    page = await browser.new_page()
     try:
-        url = "https://nlrc.go.kr/nlrc/mainCase/judgment/search/index.do"
-        print(f"   🔎 초심사건 별도 검색: {case_number}")
-        await page.goto(url, wait_until="networkidle", timeout=60000)
-        await page.fill('#pQuery', case_number)
-        await page.focus('#pQuery')
-        await page.keyboard.press('Enter')
+        async with page.expect_response(
+            lambda res: "/detail.do" in res.url and res.status == 200,
+            timeout=15000
+        ) as resp_info:
+            clicked = await page.evaluate("""
+                () => {
+                    const btn = Array.from(document.querySelectorAll('button')).find(
+                        b => b.title === '초심보기' ||
+                             (b.textContent && b.textContent.trim() === '초심보기')
+                    );
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                }
+            """)
+            if not clicked:
+                print("   ℹ️ 초심보기 버튼 없음 (초심사건 없음)")
+                return None
 
-        try:
-            async with page.expect_response(
-                lambda res: "/list.do" in res.url and res.status == 200, timeout=15000
-            ) as resp_info:
-                await page.click('.btnSearch')
-                list_content = await (await resp_info.value).text()
-        except:
-            list_content = await page.content()
+            initial_content = await (await resp_info.value).text()
 
-        list_soup = BeautifulSoup(list_content, 'html.parser')
-        committee = None
+        initial_soup = BeautifulSoup(initial_content, 'html.parser')
+        committee = extract_committee_from_detail(initial_soup)
+        matter, summary, matter_label, summary_label = extract_matter_and_summary(initial_soup)
 
-        # 위원회 이름 추출
-        for dl in list_soup.find_all('dl', class_='C_Cts'):
-            dt = dl.find('dt', class_='tit')
-            if dt:
-                a_tag = dt.find('a')
-                if a_tag:
-                    spans = a_tag.find_all('span')
-                    if spans and case_number in clean_text(spans[0].get_text()):
-                        strong = a_tag.find('strong')
-                        if strong:
-                            committee = clean_text(strong.get_text())
-                        break
-
-        # 상세 내용 클릭
-        target_selector = f'a[data-k2="{case_number}"]'
-        try:
-            async with page.expect_response(
-                lambda res: "/detail.do" in res.url and res.status == 200, timeout=15000
-            ) as det_info:
-                await page.click(target_selector, force=True)
-                detail_content = await (await det_info.value).text()
-
-            detail_soup = BeautifulSoup(detail_content, 'html.parser')
-            matter, summary, matter_label, summary_label = extract_matter_and_summary(detail_soup)
-
-            # ★ 위원회명: detail HTML에서 직접 추출 (리스트 추출보다 정확)
-            committee_from_detail = extract_committee_from_detail(detail_soup)
-            if committee_from_detail:
-                committee = committee_from_detail
-                print(f"   ✅ 위원회명 추출 (detail HTML): {committee}")
-            else:
-                print(f"   ℹ️ 위원회명 detail 추출 실패, 리스트 결과 사용: {committee}")
-
-            print(f"   ✅ 초심사건 상세 확보 (위원회: {committee})")
-            return {
-                'committee': committee,
-                'matter': matter,
-                'summary': summary,
-                'matter_label': matter_label,
-                'summary_label': summary_label
-            }
-        except Exception as e:
-            print(f"   ⚠️ 초심사건 상세 클릭 실패: {e}")
-            return {
-                'committee': committee,
-                'matter': '상세 내용 없음',
-                'summary': '상세 내용 없음',
-                'matter_label': '판정사항',
-                'summary_label': '판정요지'
-            }
+        print(f"   ✅ 초심사건 확보 (위원회: {committee})")
+        return {
+            'committee': committee,
+            'matter': matter,
+            'summary': summary,
+            'matter_label': matter_label,
+            'summary_label': summary_label
+        }
     except Exception as e:
-        print(f"   ⚠️ 초심사건 별도 검색 실패: {e}")
+        print(f"   ⚠️ 초심보기 클릭 실패: {e}")
         return None
-    finally:
-        await page.close()
 
 async def get_recent_judgments(search_keyword='부해', count=1):
     async with async_playwright() as p:
@@ -384,8 +350,10 @@ async def get_recent_judgments(search_keyword='부해', count=1):
                             )
 
                         if initial_case_number:
-                            # ★ 별도 탭에서 초심사건 검색 (상태 오염 없음)
-                            initial_data = await fetch_initial_case_details(browser, initial_case_number)
+                            # ★ 초심보기 버튼 클릭 → AJAX 응답에서 위원회 + 내용 추출
+                            # (사건번호가 여러 위원회에 중복될 수 있으므로 이 방식이 유일하게 정확)
+                            await asyncio.sleep(0.5)
+                            initial_data = await get_initial_case_by_clicking(page)
                             item['initial_case'] = initial_case_number
 
                             if initial_data and initial_data.get('committee'):
