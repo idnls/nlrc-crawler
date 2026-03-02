@@ -43,6 +43,16 @@ def extract_hidden_vals_from_soup(soup):
     for field in fields:
         el = soup.find('input', {'id': field}) or soup.find('input', {'name': field})
         result[field] = el.get('value', '').strip() if el else ''
+    # ★ 초심보기 버튼 onclick="detailClick('JR')"에서 초심 even_gubn 코드 추출
+    initial_gubn = None
+    for btn in soup.find_all('button'):
+        if btn.get('title') == '초심보기' or btn.get_text(strip=True) == '초심보기':
+            onclick = btn.get('onclick', '') or ''
+            m = re.search(r"detailClick\(['\"](\w+)['\"]\)", onclick)
+            if m:
+                initial_gubn = m.group(1)
+                break
+    result['initial_gubn'] = initial_gubn or ''
     return result
 
 async def main():
@@ -115,23 +125,25 @@ async def main():
         for k, v in hidden_vals.items():
             print(f"  {k:12s} = {v!r}")
 
-        medi_numb = hidden_vals.get('medi_numb', '')
-        even_numb = hidden_vals.get('even_numb', '')
-        even_gubn = hidden_vals.get('even_gubn', '')
+        medi_numb    = hidden_vals.get('medi_numb', '')
+        even_numb    = hidden_vals.get('even_numb', '')
+        even_gubn    = hidden_vals.get('even_gubn', '')
+        initial_gubn = hidden_vals.get('initial_gubn', '') or even_gubn  # ★ JR / DR 등
 
         if not medi_numb or medi_numb == even_numb or medi_numb == target['case_number']:
             print("\n[!] 초심사건번호(medi_numb) 없음 또는 재심과 동일 → 초심 없음")
             await browser.close()
             return
 
-        print(f"\n  → 재심: {even_numb} / 초심: {medi_numb} / 유형: {even_gubn}\n")
+        print(f"\n  → 재심: {even_numb} / 초심: {medi_numb}")
+        print(f"     재심 even_gubn: {even_gubn!r}  |  초심 initial_gubn: {initial_gubn!r}\n")
 
         # ── [B] 직접 fetch()로 초심사건 조회 ────────────────────────────────
         print("=== [B] 직접 fetch() → 초심사건 조회 ===")
         params = {
             'type':        'brjuPoin',
             'subType':     '06',
-            'even_gubn':   even_gubn,
+            'even_gubn':   initial_gubn,  # ★ 핵심: 초심 코드(JR/DR) 사용 (재심 JS/DS 아님)
             'comm_code':   hidden_vals.get('comm_code', ''),
             'begi_orga':   hidden_vals.get('begi_orga', ''),
             'even_numb':   medi_numb,       # ★ 핵심: 초심사건번호로 교체
@@ -191,13 +203,17 @@ async def main():
             print("  판정사항 th 미검출")
 
         # ── 최종 판정 ────────────────────────────────────────────────────────
+        # ★ 중앙이어도 오류 아님: 법원 파기환송 등으로 3심 구조인 경우
+        #   (지방→중앙초심→중앙재심), 초심이 중앙일 수 있음.
+        #   판단 기준: 요청한 초심사건번호가 응답에 포함됐는가.
         print(f"\n{'='*50}")
-        if medi_numb in initial_content and committee and '중앙' not in committee:
-            print(f"✅ 성공: 초심사건({medi_numb}) 정상 조회, 위원회={committee}")
-        elif medi_numb in initial_content and committee:
-            print(f"⚠️ 주의: 초심사건번호는 응답에 있으나 위원회={committee} (중앙 표시)")
+        if medi_numb in initial_content and committee:
+            print(f"✅ 성공: 초심사건({medi_numb}) 정상 조회")
+            print(f"   위원회: {committee}")
+            print(f"   (중앙 표시 시 → 법원 파기환송 등 3심 구조 케이스일 수 있음)")
         elif committee:
-            print(f"❌ 실패: 초심사건번호가 응답에 없음, 위원회={committee}")
+            print(f"❌ 실패: 초심사건번호({medi_numb})가 응답에 없음 → 파라미터 불일치")
+            print(f"   응답의 위원회: {committee}")
         else:
             print(f"❌ 실패: 위원회 미검출")
 
