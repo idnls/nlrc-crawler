@@ -117,15 +117,33 @@ def extract_matter_and_summary(detail_soup):
 def extract_committee_from_detail(detail_soup):
     """
     detail.do 응답 HTML에서 위원회 이름 추출.
-    팝업 상단에 "강원지방노동위원회 판정요지" 형식의 th/caption/h2 태그 탐색.
+    팝업 상단에 "강원지방노동위원회 판정요지" 형식의 th/caption/h2/h3/h4 태그 탐색.
+
+    ★ td 제외 이유: td는 본문 내용 셀까지 포함하므로 "중앙노동위원회"가
+      조기 매칭될 수 있음 → th/caption/h2~h4 한정.
+
+    ★ 이중 패스:
+      1차) '노동위원회' + ('판정' or '결정') 동시 포함 → 타이틀 행 우선
+      2차) '노동위원회'만 포함 (1차 미검출 시 fallback)
     """
-    for tag in detail_soup.find_all(['th', 'caption', 'h2', 'h3', 'h4', 'td']):
+    TITLE_TAGS = ['th', 'caption', 'h2', 'h3', 'h4']
+
+    # 1차: 위원회명 + 판정/결정 키워드가 함께 있는 태그 (타이틀 행)
+    for tag in detail_soup.find_all(TITLE_TAGS):
         text = tag.get_text(strip=True)
-        if '노동위원회' in text:
-            # "강원지방노동위원회 판정요지" → "강원지방노동위원회"
+        if '노동위원회' in text and ('판정' in text or '결정' in text):
             match = re.match(r'(.+노동위원회)', text)
             if match:
                 return match.group(1).strip()
+
+    # 2차: 위원회명만 있는 태그 (fallback)
+    for tag in detail_soup.find_all(TITLE_TAGS):
+        text = tag.get_text(strip=True)
+        if '노동위원회' in text:
+            match = re.match(r'(.+노동위원회)', text)
+            if match:
+                return match.group(1).strip()
+
     return None
 
 def extract_initial_case_from_html(html_content, current_case_number):
@@ -190,40 +208,86 @@ async def get_initial_case_number_via_js(page, current_case_number):
 async def get_initial_case_by_clicking(page):
     """
     현재 열린 팝업의 '초심보기' 버튼을 JS로 클릭하고,
-    detail.do AJAX 응답에서 위원회명 + 판정내용을 직접 추출.
+    DOM 직접 읽기로 위원회명 + 판정내용 추출.
 
-    ★ 이 방식이 가장 정확한 이유:
-      - 같은 사건번호(예: 2025부해381)가 전북/전남/경남 등 여러 위원회에 존재할 수 있음
-      - 사이트의 '초심보기' 버튼 자체가 hidden input(begi_orga 등)을 이용해
-        정확한 위원회의 AJAX 요청을 만들어냄
-      - 따라서 버튼을 클릭해서 나오는 AJAX 응답이 항상 정확한 초심사건 정보를 담음
+    ★ AJAX(expect_response) 방식을 버린 이유:
+      - page.expect_response("/detail.do")는 재심사건 상세보기 클릭 직후에도
+        /detail.do 응답이 큐에 남아 있어, 초심 클릭 전 응답을 잘못 캡처함.
+      - 결과적으로 항상 "중앙노동위원회" 응답이 잡힘.
+
+    ★ DOM 읽기 방식이 신뢰도 높은 이유:
+      - '초심보기' 클릭 → 팝업 DOM이 초심사건 내용으로 교체됨
+      - 교체 완료 시 "재심보기" 버튼이 DOM에 새로 나타남
+      - 이 버튼의 조상 중 layer/pop 클래스를 가진 컨테이너 = 팝업 전체 HTML
+      - 해당 HTML을 파싱하면 정확한 초심사건 위원회·내용을 얻을 수 있음
+
+    ★ 흐름:
+      1) 초심보기 버튼 JS 클릭
+      2) 2초 대기 (AJAX + 렌더링)
+      3) DOM에서 '재심보기' 버튼 탐색 → 팝업 컨테이너 outerHTML 추출
+      4) BeautifulSoup 파싱 → 위원회·판정내용 추출
     """
     try:
-        async with page.expect_response(
-            lambda res: "/detail.do" in res.url and res.status == 200,
-            timeout=15000
-        ) as resp_info:
-            clicked = await page.evaluate("""
-                () => {
-                    const btn = Array.from(document.querySelectorAll('button')).find(
-                        b => b.title === '초심보기' ||
-                             (b.textContent && b.textContent.trim() === '초심보기')
-                    );
-                    if (btn) { btn.click(); return true; }
-                    return false;
+        # Step 1: 초심보기 버튼 클릭
+        clicked = await page.evaluate("""
+            () => {
+                const btn = Array.from(document.querySelectorAll('button')).find(
+                    b => b.title === '초심보기' ||
+                         (b.textContent && b.textContent.trim() === '초심보기')
+                );
+                if (btn) { btn.click(); return true; }
+                return false;
+            }
+        """)
+        if not clicked:
+            print("   ℹ️ 초심보기 버튼 없음 (초심사건 없음)")
+            return None
+
+        # Step 2: AJAX 응답 + DOM 렌더링 대기
+        await asyncio.sleep(2)
+
+        # Step 3: '재심보기' 버튼이 나타났으면 팝업 컨테이너 HTML 추출
+        popup_html = await page.evaluate("""
+            () => {
+                // 재심보기 버튼이 생기면 초심사건 뷰로 교체된 것
+                const btns = Array.from(document.querySelectorAll('button'));
+                const resimBtn = btns.find(
+                    b => b.title === '재심보기' ||
+                         (b.textContent && b.textContent.trim() === '재심보기')
+                );
+                if (!resimBtn) return null;
+
+                // 버튼 조상 중 layer/pop 클래스를 가진 컨테이너 탐색
+                let el = resimBtn.parentElement;
+                while (el && el.tagName !== 'BODY') {
+                    const cls = (el.className || '').toLowerCase();
+                    if (cls.includes('layer') || cls.includes('pop')) {
+                        return el.outerHTML;
+                    }
+                    el = el.parentElement;
                 }
-            """)
-            if not clicked:
-                print("   ℹ️ 초심보기 버튼 없음 (초심사건 없음)")
-                return None
 
-            initial_content = await (await resp_info.value).text()
+                // fallback: 가장 가까운 table의 부모
+                const tbl = resimBtn.closest('table');
+                if (tbl && tbl.parentElement) {
+                    return tbl.parentElement.outerHTML;
+                }
 
-        initial_soup = BeautifulSoup(initial_content, 'html.parser')
+                // 최후 fallback: body 전체
+                return document.body.innerHTML;
+            }
+        """)
+
+        if not popup_html:
+            print("   ⚠️ 초심보기 클릭 후 재심보기 버튼 미검출 (DOM 교체 지연 or 구조 상이)")
+            return None
+
+        # Step 4: 파싱
+        initial_soup = BeautifulSoup(popup_html, 'html.parser')
         committee = extract_committee_from_detail(initial_soup)
         matter, summary, matter_label, summary_label = extract_matter_and_summary(initial_soup)
 
-        print(f"   ✅ 초심사건 확보 (위원회: {committee})")
+        print(f"   ✅ 초심사건 확보 (위원회: {committee}, 방식: DOM 직접 읽기)")
         return {
             'committee': committee,
             'matter': matter,
