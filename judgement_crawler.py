@@ -4,6 +4,7 @@ import os
 import sys
 import re
 import html
+import time
 from datetime import datetime
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
@@ -73,13 +74,22 @@ def send_telegram_message(text, reply_to_message_ids=None):
                 payload['reply_to_message_id'] = reply_to_message_ids[chat_id]
             try:
                 response = requests.post(url, data=payload)
-                response.raise_for_status()
                 res_data = response.json()
+                # Telegram 속도 제한(429) 발생 시 retry_after 만큼 대기 후 재시도
+                if response.status_code == 429:
+                    retry_after = res_data.get('parameters', {}).get('retry_after', 5)
+                    print(f"  ⏳ [{chat_id}] 속도 제한 → {retry_after}초 대기 후 재시도")
+                    time.sleep(retry_after)
+                    response = requests.post(url, data=payload)
+                    res_data = response.json()
+                response.raise_for_status()
                 if res_data.get('ok') and i == 0:
                     sent_message_ids[chat_id] = res_data['result']['message_id']
                 print(f"  ✅ [{chat_id}] 파트 {i+1}/{len(parts)} 전송 성공!")
             except Exception as e:
                 print(f"  ❌ [{chat_id}] 파트 {i+1} 전송 실패: {e}")
+            # 채팅방 간 / 파트 간 전송 딜레이 (Telegram 속도 제한 예방)
+            time.sleep(0.5)
     return sent_message_ids
 
 def extract_matter_and_summary(detail_soup):
